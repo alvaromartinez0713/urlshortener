@@ -1,0 +1,14 @@
+# Environment / secrets
+.env
+
+# Build artifacts
+bin/
+dist/
+
+# Coverage
+*.out
+coverage.txt
+coverage.html
+
+# Go
+*.test
