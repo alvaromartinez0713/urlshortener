@@ -1,0 +1,140 @@
+package shorturl
+
+import (
+	"errors"
+	"testing"
+)
+
+// fakeSequences is a deterministic CodeGenerator stub: each call to
+// NextSequence returns the next value in the slice. Pure stdlib, no
+// Docker/network — proves S5 testability for the domain core.
+type fakeSequences struct {
+	values []uint64
+	calls  int
+	err    error
+}
+
+func (f *fakeSequences) NextSequence() (uint64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	if f.calls >= len(f.values) {
+		return 0, errors.New("fakeSequences: exhausted")
+	}
+	v := f.values[f.calls]
+	f.calls++
+	return v, nil
+}
+
+func TestNewShortURLValidURLs(t *testing.T) {
+	tests := []struct {
+		name       string
+		longURL    string
+		sequence   uint64
+		wantTarget string
+		wantCode   string
+	}{
+		{name: "http with path", longURL: "http://example.com", sequence: 0, wantTarget: "http://example.com", wantCode: "0"},
+		{name: "https", longURL: "https://example.com/a/b?q=1", sequence: 61, wantTarget: "https://example.com/a/b?q=1", wantCode: "z"},
+		{name: "https with port", longURL: "https://example.com:8443/x", sequence: 62, wantTarget: "https://example.com:8443/x", wantCode: "10"},
+		{name: "large sequence", longURL: "https://go.dev/blog", sequence: 3844, wantTarget: "https://go.dev/blog", wantCode: "100"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gen := &fakeSequences{values: []uint64{tc.sequence}}
+
+			su, err := NewShortURL(tc.longURL, gen)
+
+			if err != nil {
+				t.Fatalf("NewShortURL(%q) unexpected error: %v", tc.longURL, err)
+			}
+			if su.Target() != tc.wantTarget {
+				t.Errorf("Target() = %q, want %q", su.Target(), tc.wantTarget)
+			}
+			if su.Code() != tc.wantCode {
+				t.Errorf("Code() = %q, want %q", su.Code(), tc.wantCode)
+			}
+			if gen.calls != 1 {
+				t.Errorf("NextSequence calls = %d, want 1", gen.calls)
+			}
+		})
+	}
+}
+
+func TestNewShortURLInvalidURLs(t *testing.T) {
+	tests := []struct {
+		name    string
+		longURL string
+		wantErr error
+	}{
+		{name: "empty", longURL: "", wantErr: ErrEmptyURL},
+		{name: "whitespace only", longURL: "   ", wantErr: ErrEmptyURL},
+		{name: "no scheme", longURL: "example.com", wantErr: ErrInvalidURL},
+		{name: "ftp scheme", longURL: "ftp://example.com/file", wantErr: ErrInvalidURLScheme},
+		{name: "javascript scheme", longURL: "javascript:alert(1)", wantErr: ErrInvalidURLScheme},
+		{name: "data scheme", longURL: "data:text/html,hello", wantErr: ErrInvalidURLScheme},
+		{name: "malformed", longURL: "http://exa mple.com", wantErr: ErrInvalidURL},
+		{name: "scheme but no host", longURL: "http://", wantErr: ErrInvalidURL},
+		{name: "userinfo trick", longURL: "http://user:pass@example.com", wantErr: ErrInvalidURL},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gen := &fakeSequences{values: []uint64{1}}
+
+			su, err := NewShortURL(tc.longURL, gen)
+
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("NewShortURL(%q) error = %v, want errors.Is %v", tc.longURL, err, tc.wantErr)
+			}
+			if su.Code() != "" || su.Target() != "" {
+				t.Errorf("rejected input must yield zero-value entity, got code=%q target=%q", su.Code(), su.Target())
+			}
+			if gen.calls != 0 {
+				t.Errorf("invalid URL must not consume a sequence, calls = %d, want 0", gen.calls)
+			}
+		})
+	}
+}
+
+func TestNewShortURLGeneratorError(t *testing.T) {
+	gen := &fakeSequences{err: errors.New("sequence source down")}
+
+	su, err := NewShortURL("https://example.com", gen)
+
+	if err == nil {
+		t.Fatal("expected error from CodeGenerator, got nil")
+	}
+	if su.Code() != "" || su.Target() != "" {
+		t.Errorf("generator failure must yield zero-value entity, got code=%q target=%q", su.Code(), su.Target())
+	}
+}
+
+func TestBase62EncodeKnownValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value uint64
+		want  string
+	}{
+		{name: "zero", value: 0, want: "0"},
+		{name: "nine", value: 9, want: "9"},
+		{name: "ten", value: 10, want: "A"},
+		{name: "thirty-five", value: 35, want: "Z"},
+		{name: "thirty-six", value: 36, want: "a"},
+		{name: "sixty-one", value: 61, want: "z"},
+		{name: "sixty-two", value: 62, want: "10"},
+		{name: "one hundred twenty-five", value: 125, want: "21"},
+		{name: "three thousand eight hundred forty-four", value: 3844, want: "100"},
+		{name: "very large", value: 1<<63 - 1, want: "AzL8n0Y58m7"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Base62Encode(tc.value)
+			if got != tc.want {
+				t.Errorf("Base62Encode(%d) = %q, want %q", tc.value, got, tc.want)
+			}
+		})
+	}
+}
