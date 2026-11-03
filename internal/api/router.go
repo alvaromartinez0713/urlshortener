@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"urlshortener/internal/shorten"
 )
 
 // NewRouter builds the Gin engine with base middleware, the health
@@ -33,6 +35,15 @@ func NewRouter() *gin.Engine {
 //	router.GET("/:code", redirectHandler.Redirect)
 //
 // No stub packages are created for them in this scaffold.
+
+// MountShorten registers the shorten slice's routes on the engine (T4).
+// It is the mounting point promised above: the api package owns all route
+// registration; the composition root only constructs the slice's handler
+// and hands it over. No business logic here — the handler owns that
+// boundary.
+func MountShorten(router *gin.Engine, h *shorten.Handler) {
+	router.POST("/shorten", h.Shorten)
+}
 
 func handleHealthz(c *gin.Context) {
 	// Deliberately touches no dependency (not even the database):
