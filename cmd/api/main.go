@@ -18,6 +18,7 @@ import (
 	"urlshortener/internal/api"
 	"urlshortener/internal/platform/config"
 	"urlshortener/internal/platform/postgres"
+	"urlshortener/internal/redirect"
 	"urlshortener/internal/shorten"
 )
 
@@ -58,15 +59,17 @@ func run() error {
 		return err
 	}
 
-	// Composition: the ONE postgres adapter implements both core-owned
-	// ports (shorten.Repository + shorturl.CodeGenerator); they stay
-	// separate port types so the slices never know the two capabilities
-	// share a connection pool.
+	// Composition: the ONE postgres adapter implements every core-owned
+	// port (shorten.Repository + shorturl.CodeGenerator + redirect.Finder);
+	// they stay separate port types so the slices never know the
+	// capabilities share a connection pool.
 	adapter := postgres.New(pool)
-	useCase := shorten.NewUseCase(adapter, adapter, baseURL)
+	shortenUseCase := shorten.NewUseCase(adapter, adapter, baseURL)
+	redirectUseCase := redirect.NewUseCase(adapter)
 
 	router := api.NewRouter()
-	api.MountShorten(router, shorten.NewHandler(useCase))
+	api.MountShorten(router, shorten.NewHandler(shortenUseCase))
+	api.MountRedirect(router, redirect.NewHandler(redirectUseCase))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

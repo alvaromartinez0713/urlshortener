@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"urlshortener/internal/redirect"
 	"urlshortener/internal/shorten"
 )
 
@@ -27,22 +28,21 @@ func NewRouter() *gin.Engine {
 	return router
 }
 
-// Mounting point for vertical slices (T4/T5): once the shorten and
-// redirect slice packages exist, the composition root registers their
-// handlers on the engine returned by NewRouter, e.g.:
-//
-//	router.POST("/shorten", shortenHandler.Shorten)
-//	router.GET("/:code", redirectHandler.Redirect)
-//
-// No stub packages are created for them in this scaffold.
-
-// MountShorten registers the shorten slice's routes on the engine (T4).
-// It is the mounting point promised above: the api package owns all route
-// registration; the composition root only constructs the slice's handler
-// and hands it over. No business logic here — the handler owns that
-// boundary.
+// Mounting point for vertical slices (T4/T5): the composition root
+// registers each slice's handler on the engine returned by NewRouter.
+// The api package owns all route registration; the composition root only
+// constructs the slice's handler and hands it over. No business logic
+// here — each handler owns that boundary.
 func MountShorten(router *gin.Engine, h *shorten.Handler) {
 	router.POST("/shorten", h.Shorten)
+}
+
+// MountRedirect registers the redirect slice's route on the engine (T5):
+// GET /:code. Static siblings in the GET tree ("/healthz") and the POST
+// "/shorten" route coexist with the :code param segment in modern Gin's
+// routing tree.
+func MountRedirect(router *gin.Engine, h *redirect.Handler) {
+	router.GET("/:code", h.Redirect)
 }
 
 func handleHealthz(c *gin.Context) {

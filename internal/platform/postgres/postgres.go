@@ -1,8 +1,9 @@
 // Package postgres is the persistence adapter of the slices: a dumb
 // translator (S5.3) between the core-owned ports (shorten.Repository,
-// shorturl.CodeGenerator) and PostgreSQL via pgx v5. It decides nothing:
-// no validation, no business rules — it stores what it is given and maps
-// storage outcomes onto the domain-level errors the slices define.
+// shorturl.CodeGenerator, redirect.Finder) and PostgreSQL via pgx v5. It
+// decides nothing: no validation, no business rules — it stores what it
+// is given and maps storage outcomes onto the domain-level errors the
+// slices define.
 package postgres
 
 import (
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"urlshortener/internal/redirect"
 	"urlshortener/internal/shorten"
 	"urlshortener/internal/shorturl"
 )
@@ -29,8 +31,13 @@ const pgErrUniqueViolation = "23505"
 // another column must not be mistaken for a code collision.
 const codeUniqueConstraint = "urls_code_key"
 
-// Repository implements shorten.Repository (write side) and
-// shorturl.CodeGenerator (sequence source) over a pgx pool.
+// Repository implements shorten.Repository (write side),
+// shorturl.CodeGenerator (sequence source) and redirect.Finder (read
+// side) over a pgx pool. Implementing several consumer-owned ports on one
+// type is correct hexagonal: the adapter serves the ports; the slices
+// never know the capabilities share a pool. The postgres package imports
+// internal/redirect because the port is owned by its consuming slice
+// (S5.2) — the same direction as the shorten import above.
 type Repository struct {
 	pool *pgxpool.Pool
 }
@@ -88,5 +95,22 @@ func (r *Repository) NextSequence() (uint64, error) {
 	return seq, nil
 }
 
-// ensure pgx import stays used if Exec error handling changes shape.
-var _ = pgx.ErrNoRows
+// FindByCode implements redirect.Finder: one SELECT, nothing else. It is
+// a dumb translator (S5.3): no code validation, no charset check, no
+// business decision — the redirect use case owns those. The only mapping
+// is storage outcome to slice error: pgx.ErrNoRows (no row for the code)
+// maps to redirect.ErrNotFound; every other failure is returned wrapped
+// with context, uninterpreted.
+func (r *Repository) FindByCode(ctx context.Context, code string) (string, error) {
+	var longURL string
+	err := r.pool.QueryRow(ctx,
+		`SELECT long_url FROM urls WHERE code = $1`, code,
+	).Scan(&longURL)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", redirect.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("postgres: find short url by code: %w", err)
+	}
+	return longURL, nil
+}
