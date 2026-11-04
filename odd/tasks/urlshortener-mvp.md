@@ -23,11 +23,11 @@ URL shortener learning project (first rung of the learning ladder). Single monol
 
 ## Tasks
 
-- **T1** [S1,S4,S8] Scaffold: go module, cmd/api wiring, Gin router, health endpoint, config via env, docker-compose for Postgres. commit: `chore: scaffold go api with gin and compose`
-- **T2** [S3,S5,S7] Domain: `ShortURL` entity (behavior: validate + build), Base62 code generator, URL validation rules. Pure unit tests (no Docker). commit: `feat(domain): shorturl entity with base62 codes and url validation`
+- **T1** [S1,S4,S8] Scaffold: go module, cmd/api wiring, Gin router, health endpoint, config via env, docker-compose for Postgres. commit: `chore: scaffold go api with gin and compose` (0f56c9f)
+- **T2** [S3,S5,S7] Domain: `ShortURL` entity (behavior: validate + build), Base62 code generator, URL validation rules. Pure unit tests (no Docker). commit: `feat(domain): shorturl entity with base62 codes and url validation` (bb13c01)
 - **T3** [S5] Ports: `Repository` interface owned by the consuming slice/use case; errors as domain values. commit: with T4/T5 (interface lands with first consumer)
-- **T4** [S1,S2,S5,S6,S7] Shorten slice: use case + Gin handler + pgx adapter + migration + sociable tests (testcontainers). commit: `feat(shorten): slice with use case, gin handler and pgx adapter`
-- **T5** [S2,S5,S6] Redirect slice: use case + Gin handler (301) + 404 + sociable tests. commit: `feat(redirect): slice with 301 redirect and 404 handling`
+- **T4** [S1,S2,S5,S6,S7] Shorten slice: use case + Gin handler + pgx adapter + migration + sociable tests (testcontainers). commit: `feat(shorten): slice with use case, gin handler and pgx adapter` (9bd6575)
+- **T5** [S2,S5,S6] Redirect slice: use case + Gin handler (301) + 404 + sociable tests. commit: `feat(redirect): slice with 301 redirect and 404 handling` (be4f652)
 - **T6** [S5] ADR-001 in `docs/decisions.md`: Gin choice, hexagonal + VSA + DDD, principles contract, monolith-first. commit: `docs: adr-001 stack and architecture principles`
 
 ## Log
@@ -38,3 +38,4 @@ URL shortener learning project (first rung of the learning ladder). Single monol
 - **L4**: "en lo de implementar VSA y yo que vamos a implemntar tambien conceptos de DDD tambien vamos a usar arquitectura hexagonal respetando los principios de las dependecias y la separacion del negocio con lo externo".
 - **L5**: "la implementacion sea de clean architecture, hexagonal o cualquier otra arquitectura no quiero nada pragmatico que cumpla al pie de la letra como se implementan las cosas, no quiero eso quiero una implementa que cumpla sus principios mas importantes y que permitan al software siempre escalar sin complicaciones o modificarse sin tanta complejidad".
 - **L6**: "antes de iniciar lo vas a crear que primero un monolito?" → confirmed monolith-first.
+- **L7**: Implementation completed (T1-T6). Verification: full suite green (unit + handler + testcontainers e2e per slice); live smoke vs compose Postgres: healthz 200, POST /shorten 201 `{"code":"1","short_url":"http://localhost:18099/1"}`, GET /1 → 301 Location exact (query+fragment preserved), javascript: URL → 422, unknown code → 404. All commits on feature/urlshortener-mvp. Push/PR left as user decision.
