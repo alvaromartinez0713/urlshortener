@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"urlshortener/internal/platform/httpx"
 )
 
 // postShorten issues a POST /shorten against a Gin engine wired with the
@@ -68,7 +69,7 @@ func TestShortenHandlerInvalidURLIsProblemDetails422(t *testing.T) {
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 			}
-			assertProblemDetails(t, rec, http.StatusUnprocessableEntity)
+			httpx.AssertProblem(t, rec, http.StatusUnprocessableEntity, httpx.TypeURI("invalid-url"))
 		})
 	}
 }
@@ -79,7 +80,7 @@ func TestShortenHandlerMalformedJSONIs400(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
-	assertProblemDetails(t, rec, http.StatusBadRequest)
+	httpx.AssertProblem(t, rec, http.StatusBadRequest, httpx.TypeURI("malformed-json"))
 }
 
 func TestShortenHandlerExhaustedRetriesIs500(t *testing.T) {
@@ -95,27 +96,5 @@ func TestShortenHandlerExhaustedRetriesIs500(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
-	assertProblemDetails(t, rec, http.StatusInternalServerError)
-}
-
-// assertProblemDetails verifies the RFC 9457 shape used across the API
-// (same shape as internal/api NoRoute): type, title, status, detail.
-func assertProblemDetails(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int) {
-	t.Helper()
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
-	}
-	if body["type"] == "" {
-		t.Error("body[type] is empty, want RFC 9457 type")
-	}
-	if body["title"] == "" {
-		t.Error("body[title] is empty, want RFC 9457 title")
-	}
-	if body["status"] != float64(wantStatus) {
-		t.Errorf("body[status] = %v, want %d", body["status"], wantStatus)
-	}
-	if body["detail"] == "" {
-		t.Error("body[detail] is empty, want RFC 9457 detail")
-	}
+	httpx.AssertProblem(t, rec, http.StatusInternalServerError, httpx.TypeURI("code-generation-exhausted"))
 }

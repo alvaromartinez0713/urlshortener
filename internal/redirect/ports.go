@@ -8,6 +8,8 @@ package redirect
 import (
 	"context"
 	"errors"
+
+	"urlshortener/internal/shorturl"
 )
 
 // Finder is the read port of the redirect slice. It is owned by the
@@ -16,20 +18,23 @@ import (
 // dumb translator (S5.3): it runs the lookup and translates storage
 // outcomes — it decides nothing.
 //
-// FindByCode returns the long URL stored for code, or:
+// FindByCode returns the ShortURL stored for code, rehydrated from the
+// row, or:
 //
 //   - ErrNotFound when no row matches the code (mapped by the adapter
 //     from pgx.ErrNoRows);
 //   - any other infrastructure error as produced by the adapter (the
 //     slice does not invent a taxonomy for storage outages).
 //
-// The port returns the raw stored string, not a domain entity: reading is
-// a lookup, and the stored target was already validated and normalized by
-// the shorten slice's rich domain when it was persisted (S7). Re-wrapping
-// it here would add nothing the data model (S6: long_url text) does not
-// hold.
+// The port returns the ShortURL entity, not a raw string (S11): the
+// adapter rehydrates the row through the domain's trusted constructor
+// shorturl.NewShortURLFromRepository, so persistence never leaks past
+// the domain — the use case and handler speak only in entities. The
+// stored values were validated by the shorten slice's rich domain when
+// they were persisted (S7); rehydration is trusted and does not
+// revalidate. The row's persistence shape stays inside the adapter.
 type Finder interface {
-	FindByCode(ctx context.Context, code string) (string, error)
+	FindByCode(ctx context.Context, code string) (shorturl.ShortURL, error)
 }
 
 // ErrNotFound is returned by Finder.FindByCode (and surfaced by the use

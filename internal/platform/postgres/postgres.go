@@ -95,22 +95,44 @@ func (r *Repository) NextSequence() (uint64, error) {
 	return seq, nil
 }
 
+// urlRow is the persistence shape of the urls table (S6) as this adapter
+// reads it. It stays PRIVATE to the adapter (S11): the row structure is a
+// storage detail — no other layer sees it. The write side (Save) reads
+// the entity through its accessors Code()/Target(); the read side maps
+// this row back through the trusted rehydration constructor
+// shorturl.NewShortURLFromRepository — write and read are symmetric over
+// one translation boundary, and no ACL layer is stacked on top (the port
+// + adapter already IS the translation boundary for our own store, L9).
+type urlRow struct {
+	Code    string
+	LongURL string
+}
+
 // FindByCode implements redirect.Finder: one SELECT, nothing else. It is
 // a dumb translator (S5.3): no code validation, no charset check, no
-// business decision — the redirect use case owns those. The only mapping
-// is storage outcome to slice error: pgx.ErrNoRows (no row for the code)
-// maps to redirect.ErrNotFound; every other failure is returned wrapped
-// with context, uninterpreted.
-func (r *Repository) FindByCode(ctx context.Context, code string) (string, error) {
-	var longURL string
+// business decision — the redirect use case owns those. Its mappings are
+// exactly two: storage outcome to slice error (pgx.ErrNoRows — no row for
+// the code — maps to redirect.ErrNotFound), and row to entity
+// (urlRow -> shorturl.NewShortURLFromRepository, S11). Every other
+// failure is returned wrapped with context, uninterpreted. The only way
+// rehydration can fail is a row missing its code or target — impossible
+// through the NOT NULL constraints on the normal write path, so it is
+// surfaced as a data-integrity failure (wrapped, → 500), not a client
+// error.
+func (r *Repository) FindByCode(ctx context.Context, code string) (shorturl.ShortURL, error) {
+	var row urlRow
 	err := r.pool.QueryRow(ctx,
-		`SELECT long_url FROM urls WHERE code = $1`, code,
-	).Scan(&longURL)
+		`SELECT code, long_url FROM urls WHERE code = $1`, code,
+	).Scan(&row.Code, &row.LongURL)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", redirect.ErrNotFound
+		return shorturl.ShortURL{}, redirect.ErrNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("postgres: find short url by code: %w", err)
+		return shorturl.ShortURL{}, fmt.Errorf("postgres: find short url by code: %w", err)
 	}
-	return longURL, nil
+	su, err := shorturl.NewShortURLFromRepository(row.Code, row.LongURL)
+	if err != nil {
+		return shorturl.ShortURL{}, fmt.Errorf("postgres: rehydrate short url for code %q: %w", code, err)
+	}
+	return su, nil
 }

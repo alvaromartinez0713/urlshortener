@@ -5,89 +5,49 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"sort"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 )
 
-// migrationsFS embeds the versioned SQL files. Embedding keeps the binary
-// self-contained: the composition root needs no data directory on disk.
+// migrationsFS embeds the goose SQL migrations (Up/Down annotated files).
+// Embedding keeps the binary self-contained: the composition root needs
+// no data directory on disk.
 //
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// RunMigrations applies the embedded SQL migrations in filename order,
-// exactly once each, tracked in schema_migrations. It is called by the
-// composition root at startup (T4 wiring) before the server accepts
-// traffic.
+// RunMigrations applies the embedded goose migrations. It is called by
+// the composition root at startup (T4 wiring) before the server accepts
+// traffic, and by the sociable tests before exercising the adapter.
 //
-// Design: deliberately small and boring — no external migration tool, no
-// down migrations. Each file runs inside a transaction so a partial
-// migration can never linger; the tracker row commits atomically with it.
+// Design (S10): ordering, tracking and concurrent-start safety are owned
+// by goose, not custom code. The provider runs against a database/sql
+// view of the existing *pgxpool.Pool (stdlib.OpenDBFromPool); closing
+// that view does not close the caller-owned pool. Provider defaults are
+// deliberately quiet (no verbose logging) — startup logs stay the
+// composition root's business. Down migrations exist in every file for
+// operators; they are never run automatically.
+//
+// Fresh-database semantics only (v1 dev): no compatibility with the old
+// hand-rolled schema_migrations table is provided.
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			filename   TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)`); err != nil {
-		return fmt.Errorf("postgres: ensure schema_migrations: %w", err)
-	}
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
 
-	files, err := fs.Glob(migrationsFS, "migrations/*.sql")
+	// Goose collects migration files with a root-level glob, so it gets
+	// the FS rooted AT the migrations directory, not the package root.
+	migrationFiles, err := fs.Sub(migrationsFS, "migrations")
 	if err != nil {
-		return fmt.Errorf("postgres: list embedded migrations: %w", err)
+		return fmt.Errorf("postgres: open embedded migrations: %w", err)
 	}
-	sort.Strings(files) // lexical order == version order for zero-padded names
-
-	for _, name := range files {
-		filename := fsFilePath(name)
-		applied, err := migrationApplied(ctx, pool, filename)
-		if err != nil {
-			return err
-		}
-		if applied {
-			continue
-		}
-
-		sqlBytes, err := migrationsFS.ReadFile(name)
-		if err != nil {
-			return fmt.Errorf("postgres: read migration %s: %w", name, err)
-		}
-
-		err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, string(sqlBytes)); err != nil {
-				return fmt.Errorf("postgres: apply migration %s: %w", filename, err)
-			}
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO schema_migrations (filename) VALUES ($1)`, filename); err != nil {
-				return fmt.Errorf("postgres: record migration %s: %w", filename, err)
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrationFiles)
+	if err != nil {
+		return fmt.Errorf("postgres: create goose provider: %w", err)
+	}
+	if _, err := provider.Up(ctx); err != nil {
+		return fmt.Errorf("postgres: apply migrations: %w", err)
 	}
 	return nil
-}
-
-func migrationApplied(ctx context.Context, pool *pgxpool.Pool, filename string) (bool, error) {
-	var exists bool
-	err := pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = $1)`, filename,
-	).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("postgres: check migration %s: %w", filename, err)
-	}
-	return exists, nil
-}
-
-// fsFilePath strips the "migrations/" prefix so the tracker stores bare
-// filenames ("0001_init.sql").
-func fsFilePath(name string) string {
-	if len(name) > len("migrations/") && name[:len("migrations/")] == "migrations/" {
-		return name[len("migrations/"):]
-	}
-	return name
 }

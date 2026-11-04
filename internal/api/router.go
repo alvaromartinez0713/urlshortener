@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"urlshortener/internal/platform/httpx"
 	"urlshortener/internal/redirect"
 	"urlshortener/internal/shorten"
 )
@@ -52,12 +53,11 @@ func handleHealthz(c *gin.Context) {
 }
 
 // handleProblemNotFound answers unknown routes with an RFC 9457
-// problem details document.
+// problem details document rendered by the shared httpx builder (S8/S9).
 func handleProblemNotFound(c *gin.Context) {
-	c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
-		"type":   "about:blank",
-		"title":  "Not Found",
-		"status": http.StatusNotFound,
-		"detail": "the requested route does not exist",
+	httpx.WriteProblem(c, httpx.Problem{
+		Status: http.StatusNotFound,
+		Type:   httpx.TypeURI("route-not-found"),
+		Detail: "the requested route does not exist",
 	})
 }

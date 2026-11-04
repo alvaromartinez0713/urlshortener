@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"urlshortener/internal/platform/httpx"
 )
 
 // Handler is the HTTP adapter of the redirect slice (S5.3): it translates
@@ -27,6 +29,9 @@ func NewHandler(uc *UseCase) *Handler {
 //   - 500 problem details for infrastructure failures — internal error
 //     text never reaches the user (S8).
 //
+// Every problem answer is rendered by the shared httpx builder (S9);
+// only the error→problem mapping below is slice-owned.
+//
 // 301 vs 302, documented: S2 mandates a permanent redirect. 301 lets
 // browsers and proxies cache the mapping, which is correct for v1 because
 // codes are immutable — there is no API to re-point a code, and the S3
@@ -40,34 +45,33 @@ func NewHandler(uc *UseCase) *Handler {
 // with a host); a pure-ASCII target appears in the Location header exactly
 // as stored, pinned by TestRedirectHandlerMovedPermanentlyWithExactLocation.
 func (h *Handler) Redirect(c *gin.Context) {
-	target, err := h.uc.Redirect(c.Request.Context(), c.Param("code"))
+	su, err := h.uc.Redirect(c.Request.Context(), c.Param("code"))
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrNotFound):
-			writeProblem(c, http.StatusNotFound, "Not Found",
-				"the requested short code does not exist")
-		default:
-			// Infrastructure failure: generic treatment, no internals
-			// leaked (S8).
-			writeProblem(c, http.StatusInternalServerError, "Internal Server Error",
-				"the request could not be processed at this time")
-		}
+		httpx.WriteProblem(c, problemFor(err))
 		return
 	}
 
-	c.Redirect(http.StatusMovedPermanently, target)
+	c.Redirect(http.StatusMovedPermanently, su.Target())
 }
 
-// writeProblem answers with an RFC 9457 problem details document (S8),
-// the same shape as internal/api's NoRoute handler and the shorten
-// slice's. Deliberately a local copy, not a shared package: slices are
-// independent boundaries (S5.4) and a 10-line helper does not justify
-// coupling them.
-func writeProblem(c *gin.Context, status int, title, detail string) {
-	c.AbortWithStatusJSON(status, gin.H{
-		"type":   "about:blank",
-		"title":  title,
-		"status": status,
-		"detail": detail,
-	})
+// problemFor is THE single domain-error → HTTP mapping of the redirect
+// slice (S9). Per-slice by design (S5.4): ErrNotFound is a redirect-slice
+// value; the shared httpx package renders, it never imports slice errors.
+func problemFor(err error) httpx.Problem {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return httpx.Problem{
+			Status: http.StatusNotFound,
+			Type:   httpx.TypeURI("unknown-code"),
+			Detail: "the requested short code does not exist",
+		}
+	default:
+		// Infrastructure failure: generic treatment, no internals
+		// leaked (S8).
+		return httpx.Problem{
+			Status: http.StatusInternalServerError,
+			Type:   httpx.TypeURI("internal-error"),
+			Detail: "the request could not be processed at this time",
+		}
+	}
 }
