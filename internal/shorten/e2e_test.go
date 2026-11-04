@@ -78,7 +78,8 @@ func newE2ERouter(t *testing.T) (http.Handler, *pgxpool.Pool) {
 	return router, pool
 }
 
-func e2ePost(t *testing.T, router http.Handler, body string) *httptest.ResponseRecorder {	t.Helper()
+func e2ePost(t *testing.T, router http.Handler, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/shorten", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

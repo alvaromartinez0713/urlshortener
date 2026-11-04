@@ -68,4 +68,3 @@ func TestRedirectHandlerInfraFailureIs500(t *testing.T) {
 	}
 	httpx.AssertProblem(t, rec, http.StatusInternalServerError, httpx.TypeURI("internal-error"))
 }
-

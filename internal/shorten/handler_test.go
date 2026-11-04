@@ -98,4 +98,3 @@ func TestShortenHandlerExhaustedRetriesIs500(t *testing.T) {
 	}
 	httpx.AssertProblem(t, rec, http.StatusInternalServerError, httpx.TypeURI("code-generation-exhausted"))
 }
-
