@@ -78,6 +78,61 @@ func dockerUnavailable(err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
+// TestRunMigrationsIdempotentAndTracked pins the S10 contract: migrations
+// are tracked by goose's own table (not the hand-rolled schema_migrations),
+// and running the migrations twice is a no-op the second time.
+func TestRunMigrationsIdempotentAndTracked(t *testing.T) {
+	// startPostgres applies the migrations once (first run).
+	pool := startPostgres(t)
+	ctx := context.Background()
+
+	// Second run: tracking must make this a no-op, not an error.
+	if err := RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("second RunMigrations: %v", err)
+	}
+
+	var tracked bool
+	err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'goose_db_version')`,
+	).Scan(&tracked)
+	if err != nil {
+		t.Fatalf("check goose_db_version: %v", err)
+	}
+	if !tracked {
+		t.Fatal("goose_db_version table missing: migrations must be tracked by the tool (S10)")
+	}
+
+	// Migration 0001 is the only one; it must be recorded as applied.
+	var version int64
+	if err := pool.QueryRow(ctx,
+		`SELECT max(version_id) FROM goose_db_version`,
+	).Scan(&version); err != nil {
+		t.Fatalf("read goose tracking table: %v", err)
+	}
+	if version != 1 {
+		t.Errorf("goose_db_version max(version_id) = %d, want 1", version)
+	}
+
+	// Schema semantics unchanged (S6): insert + select works and the
+	// unique constraint on code is present.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO urls (code, long_url) VALUES ($1, $2)`, "zzz", "https://example.com/zzz"); err != nil {
+		t.Fatalf("insert into urls: %v", err)
+	}
+	var longURL string
+	if err := pool.QueryRow(ctx,
+		`SELECT long_url FROM urls WHERE code = $1`, "zzz").Scan(&longURL); err != nil {
+		t.Fatalf("select from urls: %v", err)
+	}
+	if longURL != "https://example.com/zzz" {
+		t.Errorf("long_url = %q, want https://example.com/zzz", longURL)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO urls (code, long_url) VALUES ($1, $2)`, "zzz", "https://example.com/other"); err == nil {
+		t.Error("duplicate code insert succeeded, want unique violation on urls.code")
+	}
+}
+
 func TestSavePersistsRow(t *testing.T) {
 	pool := startPostgres(t)
 	repo := New(pool)
