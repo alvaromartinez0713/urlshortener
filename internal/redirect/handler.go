@@ -45,13 +45,13 @@ func NewHandler(uc *UseCase) *Handler {
 // with a host); a pure-ASCII target appears in the Location header exactly
 // as stored, pinned by TestRedirectHandlerMovedPermanentlyWithExactLocation.
 func (h *Handler) Redirect(c *gin.Context) {
-	target, err := h.uc.Redirect(c.Request.Context(), c.Param("code"))
+	su, err := h.uc.Redirect(c.Request.Context(), c.Param("code"))
 	if err != nil {
 		httpx.WriteProblem(c, problemFor(err))
 		return
 	}
 
-	c.Redirect(http.StatusMovedPermanently, target)
+	c.Redirect(http.StatusMovedPermanently, su.Target())
 }
 
 // problemFor is THE single domain-error → HTTP mapping of the redirect

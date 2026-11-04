@@ -3,6 +3,8 @@ package redirect
 import (
 	"context"
 	"strings"
+
+	"urlshortener/internal/shorturl"
 )
 
 // UseCase resolves short codes to their stored targets. It depends only
@@ -44,9 +46,14 @@ func NewUseCase(finder Finder) *UseCase {
 //   - ErrNotFound — no row matches the code (404);
 //   - anything else — infrastructure failure from the port, propagated
 //     as-is (500).
-func (uc *UseCase) Redirect(ctx context.Context, code string) (string, error) {
+//
+// On success it returns the rehydrated ShortURL entity (S11): the read
+// port speaks in domain entities, not raw strings — persistence never
+// leaks past the domain. On any error the returned entity is the zero
+// value.
+func (uc *UseCase) Redirect(ctx context.Context, code string) (shorturl.ShortURL, error) {
 	if !isPossibleCode(code) {
-		return "", ErrNotFound
+		return shorturl.ShortURL{}, ErrNotFound
 	}
 	return uc.finder.FindByCode(ctx, code)
 }

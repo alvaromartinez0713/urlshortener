@@ -9,32 +9,50 @@ import (
 )
 
 // fakeFinder is a deterministic Finder fake: FindByCode returns the
-// configured target and error. It holds no call counter — interactions are
-// asserted through behavior (what the use case returns given what the fake
-// would answer), never through spying on the port (ADR-002). Pure stdlib —
-// proves the use case tests run without Docker or network (S5.5).
+// configured rehydrated entity and error. It holds no call counter —
+// interactions are asserted through behavior (what the use case returns
+// given what the fake would answer), never through spying on the port
+// (ADR-002). Pure stdlib — proves the use case tests run without Docker
+// or network (S5.5).
 type fakeFinder struct {
-	target string
-	err    error
+	su  shorturl.ShortURL
+	err error
 }
 
-func (f *fakeFinder) FindByCode(ctx context.Context, code string) (string, error) {
-	return f.target, f.err
+func (f *fakeFinder) FindByCode(ctx context.Context, code string) (shorturl.ShortURL, error) {
+	return f.su, f.err
 }
 
-func TestRedirectSuccessReturnsStoredTarget(t *testing.T) {
-	// A code that matches a row resolves to the stored long URL, exactly
-	// as persisted (S2: GET /:code redirects to the target).
-	finder := &fakeFinder{target: "https://example.com/a/b?q=1#frag"}
+// mustRehydrate builds a stored entity through the domain's trusted
+// rehydration constructor (S11), failing the test if it refuses.
+func mustRehydrate(t *testing.T, code, target string) shorturl.ShortURL {
+	t.Helper()
+	su, err := shorturl.NewShortURLFromRepository(code, target)
+	if err != nil {
+		t.Fatalf("rehydrate %q -> %q: %v", code, target, err)
+	}
+	return su
+}
+
+func TestRedirectSuccessReturnsStoredEntity(t *testing.T) {
+	// S11: the read port returns the ShortURL entity, not a raw string.
+	// A code that matches a row resolves to the rehydrated entity whose
+	// Target() is the stored long URL exactly as persisted (S2: GET
+	// /:code redirects to the target).
+	want := "https://example.com/a/b?q=1#frag"
+	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
 	uc := NewUseCase(finder)
 
-	target, err := uc.Redirect(context.Background(), "10")
+	su, err := uc.Redirect(context.Background(), "10")
 
 	if err != nil {
 		t.Fatalf("Redirect unexpected error: %v", err)
 	}
-	if target != "https://example.com/a/b?q=1#frag" {
-		t.Errorf("target = %q, want the stored long URL unchanged", target)
+	if su.Target() != want {
+		t.Errorf("Target() = %q, want the stored long URL unchanged", su.Target())
+	}
+	if su.Code() != "10" {
+		t.Errorf("Code() = %q, want the looked-up code", su.Code())
 	}
 }
 
@@ -44,13 +62,13 @@ func TestRedirectUnknownCodeIsErrNotFound(t *testing.T) {
 	finder := &fakeFinder{err: ErrNotFound}
 	uc := NewUseCase(finder)
 
-	target, err := uc.Redirect(context.Background(), "zzz")
+	su, err := uc.Redirect(context.Background(), "zzz")
 
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Redirect error = %v, want errors.Is ErrNotFound", err)
 	}
-	if target != "" {
-		t.Errorf("target = %q, want empty on failure", target)
+	if su != (shorturl.ShortURL{}) {
+		t.Errorf("entity = %+v, want the zero value on failure", su)
 	}
 }
 
@@ -61,13 +79,13 @@ func TestRedirectInfraErrorPropagates(t *testing.T) {
 	finder := &fakeFinder{err: infraErr}
 	uc := NewUseCase(finder)
 
-	target, err := uc.Redirect(context.Background(), "10")
+	su, err := uc.Redirect(context.Background(), "10")
 
 	if !errors.Is(err, infraErr) {
 		t.Fatalf("Redirect error = %v, want errors.Is %v", err, infraErr)
 	}
-	if target != "" {
-		t.Errorf("target = %q, want empty on failure", target)
+	if su != (shorturl.ShortURL{}) {
+		t.Errorf("entity = %+v, want the zero value on failure", su)
 	}
 }
 
@@ -94,16 +112,16 @@ func TestRedirectImpossibleCodeRejectedWithoutPortCall(t *testing.T) {
 			// call counter (ADR-002): the fake finder is configured to
 			// SUCCEED if it were reached, so only the use case's fast path
 			// can produce ErrNotFound for an impossible code.
-			finder := &fakeFinder{target: "PORT-MUST-NOT-BE-REACHED"}
+			finder := &fakeFinder{su: mustRehydrate(t, "10", "PORT-MUST-NOT-BE-REACHED")}
 			uc := NewUseCase(finder)
 
-			target, err := uc.Redirect(context.Background(), tc.code)
+			su, err := uc.Redirect(context.Background(), tc.code)
 
 			if !errors.Is(err, ErrNotFound) {
 				t.Fatalf("Redirect(%q) error = %v, want errors.Is ErrNotFound", tc.code, err)
 			}
-			if target != "" {
-				t.Errorf("target = %q, want empty on failure", target)
+			if su != (shorturl.ShortURL{}) {
+				t.Errorf("entity = %+v, want the zero value on failure", su)
 			}
 		})
 	}

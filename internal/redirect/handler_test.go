@@ -29,8 +29,8 @@ func TestRedirectHandlerMovedPermanentlyWithExactLocation(t *testing.T) {
 	// gin's c.Redirect delegates to net/http.Redirect, which hex-escapes
 	// only non-ASCII bytes, so a pure-ASCII target must appear in the
 	// Location header exactly as stored.
-	finder := &fakeFinder{target: "https://example.com/a/b?q=1&lang=en#section-2"}
-	uc := NewUseCase(finder)
+	su := mustRehydrate(t, "10", "https://example.com/a/b?q=1&lang=en#section-2")
+	uc := NewUseCase(&fakeFinder{su: su})
 
 	rec := getRedirect(t, uc, "10")
 

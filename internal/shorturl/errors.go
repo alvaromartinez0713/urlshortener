@@ -20,4 +20,10 @@ var (
 	// ErrInvalidURLScheme is returned when the URL parses but its scheme
 	// is neither http nor https.
 	ErrInvalidURLScheme = errors.New("shorturl: only http and https schemes are allowed")
+	// ErrCorruptStoredShortURL is returned by NewShortURLFromRepository
+	// when the stored row is missing its code or target — something only
+	// a corrupted or manually tampered row can produce (the schema's NOT
+	// NULL constraints guard the normal write path). It signals a data
+	// integrity problem, not invalid user input.
+	ErrCorruptStoredShortURL = errors.New("shorturl: stored short url is missing its code or target")
 )
