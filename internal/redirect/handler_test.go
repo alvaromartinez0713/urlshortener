@@ -2,20 +2,26 @@ package redirect
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"urlshortener/internal/api/middleware"
 	"urlshortener/internal/platform/httpx"
 )
 
-// getRedirect issues a GET /:code against a Gin engine wired with the
-// handler under test and returns the recorder.
+// getRedirect issues a GET /:code against a Gin engine wired like the
+// composition root's stack (error middleware + handler) and returns the
+// recorder. The response contract asserted below is identical before and
+// after S13 (handlers attach, middleware renders) — behavior lock.
 func getRedirect(t *testing.T, uc *UseCase, code string) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	router.Use(middleware.ErrorHandler(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	router.GET("/:code", NewHandler(uc).Redirect)
 
 	rec := httptest.NewRecorder()
