@@ -9,10 +9,14 @@ package shorten_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"urlshortener/internal/api"
 	"urlshortener/internal/platform/postgres"
@@ -22,46 +26,95 @@ import (
 	postgresContainer "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
+// Shared container (S12 fast feedback, T11): ONE Postgres container per
+// package, started lazily on first use and reused by every e2e test in the
+// package; tests stay SEQUENTIAL (no t.Parallel) so the shared handle is
+// consumed without races. TestMain terminates the container after the run
+// (ryuk is disabled on this host; see startE2EPostgres).
+var (
+	sharedOnce sync.Once
+	sharedPool *pgxpool.Pool
+	sharedCtr  *postgresContainer.PostgresContainer
+	sharedErr  error
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sharedPool != nil {
+		sharedPool.Close()
+	}
+	if sharedCtr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sharedCtr.Terminate(ctx)
+	}
+	os.Exit(code)
+}
+
+// startE2EPostgres returns the package-wide Postgres pool with a clean urls
+// table. Skips (instead of failing) when Docker is unavailable.
 func startE2EPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	ctx := context.Background()
 
 	// Same SELinux workaround as internal/platform/postgres: ryuk's
 	// bind-mounted Docker socket is denied by the enforcing host policy;
-	// disable it and rely on t.Cleanup for termination.
+	// disable it and rely on TestMain for termination.
 	t.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
 
-	ctr, err := postgresContainer.Run(ctx, "postgres:16-alpine",
-		// Wait for BOTH "ready to accept connections" log lines: after
-		// initdb the server restarts once, and connecting during that
-		// window gets connections reset.
-		postgresContainer.BasicWaitStrategies(),
-		postgresContainer.WithDatabase("urlshortener"),
-		postgresContainer.WithUsername("urlshortener"),
-		postgresContainer.WithPassword("urlshortener"),
-	)
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "docker") {
-			t.Skipf("docker unavailable, skipping e2e test: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sharedOnce.Do(func() {
+		ctr, err := postgresContainer.Run(ctx, "postgres:16-alpine",
+			// Wait for BOTH "ready to accept connections" log lines: after
+			// initdb the server restarts once, and connecting during that
+			// window gets connections reset.
+			postgresContainer.BasicWaitStrategies(),
+			postgresContainer.WithDatabase("urlshortener"),
+			postgresContainer.WithUsername("urlshortener"),
+			postgresContainer.WithPassword("urlshortener"),
+		)
+		if err != nil {
+			sharedErr = fmt.Errorf("start postgres container: %w", err)
+			return
 		}
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
+		sharedCtr = ctr
 
-	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("container connection string: %v", err)
-	}
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
+		dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
+		if err != nil {
+			sharedErr = fmt.Errorf("container connection string: %w", err)
+			return
+		}
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			sharedErr = fmt.Errorf("connect pool: %w", err)
+			return
+		}
 
-	if err := postgres.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("run migrations: %v", err)
+		if err := postgres.RunMigrations(context.Background(), pool); err != nil {
+			pool.Close()
+			sharedErr = fmt.Errorf("run migrations: %w", err)
+			return
+		}
+		sharedPool = pool
+	})
+
+	if sharedErr != nil {
+		if strings.Contains(strings.ToLower(sharedErr.Error()), "docker") {
+			t.Skipf("docker unavailable, skipping e2e test: %v", sharedErr)
+		}
+		t.Fatalf("start shared postgres: %v", sharedErr)
 	}
-	return pool
+
+	// Per-test DATA isolation (S12): TRUNCATE ... RESTART IDENTITY before
+	// each test. Chosen over unique fixtures because the rejected-input
+	// test asserts count(*) = 0 over the WHOLE urls table; RESTART IDENTITY
+	// additionally keeps the shared sequence deterministic for every test.
+	// Tests are sequential, so a truncate at test start is race-free.
+	if _, err := sharedPool.Exec(context.Background(), `TRUNCATE urls RESTART IDENTITY`); err != nil {
+		t.Fatalf("reset urls table: %v", err)
+	}
+	return sharedPool
 }
 
 // newE2ERouter wires the composition root's real dependency chain:

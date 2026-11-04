@@ -11,7 +11,10 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,54 +25,104 @@ import (
 	postgresContainer "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-// startPostgres starts a disposable Postgres container, applies the
-// embedded migrations, and returns a connected pool. Terminates on test
-// cleanup. Skips (instead of failing) when Docker is unavailable.
+// Shared container (S12 fast feedback, T11): ONE Postgres container per
+// package, started lazily on first use and reused by every container test
+// in the package. Container startup (~7-8s) dominates wall time, so N
+// starts collapse into one. Tests stay SEQUENTIAL (no t.Parallel), so the
+// shared handle is consumed without races, and TestMain terminates the
+// container after the run (ryuk is disabled on this host; see below).
+var (
+	sharedOnce sync.Once
+	sharedPool *pgxpool.Pool
+	sharedCtr  *postgresContainer.PostgresContainer
+	sharedErr  error
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sharedPool != nil {
+		sharedPool.Close()
+	}
+	if sharedCtr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sharedCtr.Terminate(ctx)
+	}
+	os.Exit(code)
+}
+
+// startPostgres returns the package-wide Postgres pool with a clean urls
+// table. Skips (instead of failing) when Docker is unavailable.
 func startPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	ctx := context.Background()
 
 	// Environmental workaround, documented: this host runs SELinux in
 	// enforcing mode, which denies testcontainers' ryuk reaper container
 	// access to the bind-mounted Docker socket (the mount works only with
 	// --security-opt label=disable, which the reaper mount cannot carry).
-	// Ryuk is therefore disabled for these tests; cleanup is still
-	// guaranteed by t.Cleanup below, which terminates every container it
-	// started. On hosts without this SELinux restriction, ryuk remains
+	// Ryuk is therefore disabled for these tests; cleanup is instead
+	// guaranteed by TestMain, which terminates the shared container after
+	// the run. On hosts without this SELinux restriction, ryuk remains
 	// enabled unless this env var is set.
 	t.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
 
-	ctr, err := postgresContainer.Run(ctx, "postgres:16-alpine",
-		// Wait for BOTH "ready to accept connections" log lines: after
-		// initdb the server restarts once, and connecting during that
-		// window gets connections reset.
-		postgresContainer.BasicWaitStrategies(),
-		postgresContainer.WithDatabase("urlshortener"),
-		postgresContainer.WithUsername("urlshortener"),
-		postgresContainer.WithPassword("urlshortener"),
-	)
-	if err != nil {
-		if dockerUnavailable(err) {
-			t.Skipf("docker unavailable, skipping sociable test: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sharedOnce.Do(func() {
+		ctr, err := postgresContainer.Run(ctx, "postgres:16-alpine",
+			// Wait for BOTH "ready to accept connections" log lines: after
+			// initdb the server restarts once, and connecting during that
+			// window gets connections reset.
+			postgresContainer.BasicWaitStrategies(),
+			postgresContainer.WithDatabase("urlshortener"),
+			postgresContainer.WithUsername("urlshortener"),
+			postgresContainer.WithPassword("urlshortener"),
+		)
+		if err != nil {
+			sharedErr = fmt.Errorf("start postgres container: %w", err)
+			return
 		}
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
+		sharedCtr = ctr
 
-	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("container connection string: %v", err)
-	}
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
+		dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
+		if err != nil {
+			sharedErr = fmt.Errorf("container connection string: %w", err)
+			return
+		}
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			sharedErr = fmt.Errorf("connect pool: %w", err)
+			return
+		}
 
-	if err := RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("run migrations: %v", err)
+		if err := RunMigrations(context.Background(), pool); err != nil {
+			pool.Close()
+			sharedErr = fmt.Errorf("run migrations: %w", err)
+			return
+		}
+		sharedPool = pool
+	})
+
+	if sharedErr != nil {
+		if dockerUnavailable(sharedErr) {
+			t.Skipf("docker unavailable, skipping sociable test: %v", sharedErr)
+		}
+		t.Fatalf("start shared postgres: %v", sharedErr)
 	}
-	return pool
+
+	// Per-test DATA isolation (S12): TRUNCATE ... RESTART IDENTITY before
+	// each test, chosen over unique fixtures because several assertions
+	// here are absolute over the whole table ("rejected input persists
+	// nothing" counts rows; the collision test counts rows with code
+	// "10"), and RESTART IDENTITY keeps the sequence deterministic for
+	// sequence-adjacent assertions (NextSequence is asserted relatively,
+	// second > first, so it holds either way). Tests are sequential, so a
+	// truncate at test start is race-free.
+	if _, err := sharedPool.Exec(context.Background(), `TRUNCATE urls RESTART IDENTITY`); err != nil {
+		t.Fatalf("reset urls table: %v", err)
+	}
+	return sharedPool
 }
 
 func dockerUnavailable(err error) bool {
@@ -82,11 +135,13 @@ func dockerUnavailable(err error) bool {
 // are tracked by goose's own table (not the hand-rolled schema_migrations),
 // and running the migrations twice is a no-op the second time.
 func TestRunMigrationsIdempotentAndTracked(t *testing.T) {
-	// startPostgres applies the migrations once (first run).
+	// The shared container applied the migrations once at startup; this
+	// second RunMigrations call pins the S10 contract: tracking makes a
+	// re-run a no-op, not an error.
 	pool := startPostgres(t)
 	ctx := context.Background()
 
-	// Second run: tracking must make this a no-op, not an error.
+	// Re-run: tracking must make this a no-op, not an error.
 	if err := RunMigrations(ctx, pool); err != nil {
 		t.Fatalf("second RunMigrations: %v", err)
 	}
