@@ -1,13 +1,13 @@
 package redirect
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"urlshortener/internal/platform/httpx"
 )
 
 // getRedirect issues a GET /:code against a Gin engine wired with the
@@ -53,7 +53,7 @@ func TestRedirectHandlerUnknownCodeIsProblemDetails404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
-	assertRedirectProblemDetails(t, rec, http.StatusNotFound)
+	httpx.AssertProblem(t, rec, http.StatusNotFound, httpx.TypeURI("unknown-code"))
 }
 
 func TestRedirectHandlerInfraFailureIs500(t *testing.T) {
@@ -66,28 +66,6 @@ func TestRedirectHandlerInfraFailureIs500(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
-	assertRedirectProblemDetails(t, rec, http.StatusInternalServerError)
+	httpx.AssertProblem(t, rec, http.StatusInternalServerError, httpx.TypeURI("internal-error"))
 }
 
-// assertRedirectProblemDetails verifies the RFC 9457 shape used across
-// the API (same shape as internal/api NoRoute and the shorten slice):
-// type, title, status, detail.
-func assertRedirectProblemDetails(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int) {
-	t.Helper()
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
-	}
-	if body["type"] == "" {
-		t.Error("body[type] is empty, want RFC 9457 type")
-	}
-	if body["title"] == "" {
-		t.Error("body[title] is empty, want RFC 9457 title")
-	}
-	if body["status"] != float64(wantStatus) {
-		t.Errorf("body[status] = %v, want %d", body["status"], wantStatus)
-	}
-	if body["detail"] == "" {
-		t.Error("body[detail] is empty, want RFC 9457 detail")
-	}
-}

@@ -146,8 +146,8 @@ func TestRedirectE2EUnknownCodeIs404ProblemJSON(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
-	if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
-		t.Errorf("Content-Type = %q, want JSON (S8: no HTML default page)", got)
+	if got := rec.Header().Get("Content-Type"); got != "application/problem+json" {
+		t.Errorf("Content-Type = %q, want application/problem+json (S9: complete RFC 9457)", got)
 	}
 	var body map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {

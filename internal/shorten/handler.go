@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"urlshortener/internal/platform/httpx"
 	"urlshortener/internal/shorturl"
 )
 
@@ -37,28 +38,25 @@ type shortenRequest struct {
 //   - 500 problem details for exhausted collision retries or
 //     infrastructure failures — internal error text never reaches the
 //     user (S8).
+//
+// Every problem answer is rendered by the shared httpx builder (S9),
+// which owns the complete wire contract (application/problem+json,
+// type/title/status/detail). Only the error→problem mapping below is
+// slice-owned.
 func (h *Handler) Shorten(c *gin.Context) {
 	var req shortenRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		writeProblem(c, http.StatusBadRequest, "Bad Request",
-			"the request body must be valid JSON with a \"url\" field")
+		httpx.WriteProblem(c, httpx.Problem{
+			Status: http.StatusBadRequest,
+			Type:   httpx.TypeURI("malformed-json"),
+			Detail: "the request body must be valid JSON with a \"url\" field",
+		})
 		return
 	}
 
 	res, err := h.uc.Shorten(c.Request.Context(), req.URL)
 	if err != nil {
-		switch {
-		case isInvalidInput(err):
-			writeProblem(c, http.StatusUnprocessableEntity, "Unprocessable Entity", err.Error())
-		case errors.Is(err, ErrCodeGenerationExhausted):
-			writeProblem(c, http.StatusInternalServerError, "Internal Server Error",
-				"the short code could not be generated at this time")
-		default:
-			// Infrastructure failure: same generic treatment, no
-			// internals leaked (S8).
-			writeProblem(c, http.StatusInternalServerError, "Internal Server Error",
-				"the request could not be processed at this time")
-		}
+		httpx.WriteProblem(c, problemFor(err))
 		return
 	}
 
@@ -77,13 +75,33 @@ func isInvalidInput(err error) bool {
 		errors.Is(err, shorturl.ErrInvalidURLScheme)
 }
 
-// writeProblem answers with an RFC 9457 problem details document (S8),
-// the same shape as internal/api's NoRoute handler.
-func writeProblem(c *gin.Context, status int, title, detail string) {
-	c.AbortWithStatusJSON(status, gin.H{
-		"type":   "about:blank",
-		"title":  title,
-		"status": status,
-		"detail": detail,
-	})
+// problemFor is THE single domain-error → HTTP mapping of the shorten
+// slice (S9). It lives here, not in a shared map, by design (S5.4):
+// the errors it inspects are shorten-slice/domain values; redirect and
+// future slices own their own mappings, while httpx owns only the
+// rendering. A shared map would couple independent slices through their
+// error values.
+func problemFor(err error) httpx.Problem {
+	switch {
+	case isInvalidInput(err):
+		return httpx.Problem{
+			Status: http.StatusUnprocessableEntity,
+			Type:   httpx.TypeURI("invalid-url"),
+			Detail: err.Error(),
+		}
+	case errors.Is(err, ErrCodeGenerationExhausted):
+		return httpx.Problem{
+			Status: http.StatusInternalServerError,
+			Type:   httpx.TypeURI("code-generation-exhausted"),
+			Detail: "the short code could not be generated at this time",
+		}
+	default:
+		// Infrastructure failure: same generic treatment, no
+		// internals leaked (S8).
+		return httpx.Problem{
+			Status: http.StatusInternalServerError,
+			Type:   httpx.TypeURI("internal-error"),
+			Detail: "the request could not be processed at this time",
+		}
+	}
 }
