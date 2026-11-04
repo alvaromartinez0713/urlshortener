@@ -12,12 +12,15 @@ import (
 	"urlshortener/internal/shorturl"
 )
 
-// fakeSequences is a deterministic CodeGenerator stub (implements
-// shorturl.CodeGenerator): each call returns the next value in values, or
-// err once set. Records call count for retry-bound assertions.
+// fakeSequences is a deterministic CodeGenerator fake (implements
+// shorturl.CodeGenerator): each call returns the next value in values; once
+// the configured values are exhausted it fails. Its bound is modeled through
+// INPUTS (how many values it holds), never through a call counter — a spy is
+// an interaction assertion; the values list is behavior the use case can
+// observe through the port (ADR-002). Pure stdlib — proves the use case
+// tests run without Docker or network (S5.5).
 type fakeSequences struct {
 	values []uint64
-	calls  int
 	err    error
 }
 
@@ -25,11 +28,11 @@ func (f *fakeSequences) NextSequence() (uint64, error) {
 	if f.err != nil {
 		return 0, f.err
 	}
-	if f.calls >= len(f.values) {
+	if len(f.values) == 0 {
 		return 0, errors.New("fakeSequences: exhausted")
 	}
-	v := f.values[f.calls]
-	f.calls++
+	v := f.values[0]
+	f.values = f.values[1:]
 	return v, nil
 }
 
@@ -106,23 +109,29 @@ func TestShortenCollisionRetriesThenSucceeds(t *testing.T) {
 	if res.Code != "2" {
 		t.Errorf("res.Code = %q, want %q (code from the retried sequence)", res.Code, "2")
 	}
-	if len(repo.saved) != 2 {
-		t.Fatalf("Save calls = %d, want 2", len(repo.saved))
-	}
+	// Behavior, not interaction counts (ADR-002): the code from the
+	// retried sequence is the one that ends up persisted, after the
+	// collided first attempt. repo.saved is the fake repo's effect log —
+	// the port's observable effect, not a spy.
 	if repo.saved[0].Code() != "1" {
-		t.Errorf("first attempt saved code %q, want %q", repo.saved[0].Code(), "1")
+		t.Errorf("first attempt persisted code %q, want %q", repo.saved[0].Code(), "1")
 	}
-	if gen.calls != 2 {
-		t.Errorf("NextSequence calls = %d, want 2", gen.calls)
+	if last := repo.saved[len(repo.saved)-1]; last.Code() != "2" {
+		t.Errorf("successful attempt persisted code %q, want %q (the retried sequence)", last.Code(), "2")
 	}
 }
 
 func TestShortenExhaustedRetries(t *testing.T) {
 	// Every attempt collides: after the bounded number of retries the use
-	// case stops with ErrCodeGenerationExhausted, consuming a bounded
-	// number of sequences (S3).
+	// case stops with ErrCodeGenerationExhausted (S3).
+	//
+	// The bound is modeled through INPUTS, not counted (ADR-002): the
+	// fake generator exposes exactly maxCodeAttempts sequence values, so
+	// a use case that attempted even one retry beyond the bound would
+	// surface the fake's own exhaustion error instead of
+	// ErrCodeGenerationExhausted and fail this test.
 	repo := &fakeRepo{saveErrs: []error{ErrCodeCollision, ErrCodeCollision, ErrCodeCollision}}
-	gen := &fakeSequences{values: []uint64{1, 2, 3, 4, 5}}
+	gen := &fakeSequences{values: []uint64{1, 2, 3}}
 	uc := NewUseCase(repo, gen, "https://sho.rt")
 
 	res, err := uc.Shorten(context.Background(), "https://example.com")
@@ -132,12 +141,6 @@ func TestShortenExhaustedRetries(t *testing.T) {
 	}
 	if res != (Result{}) {
 		t.Errorf("exhausted retries must yield zero Result, got %+v", res)
-	}
-	if got := len(repo.saved); got != maxCodeAttempts {
-		t.Errorf("Save calls = %d, want %d (bounded retries)", got, maxCodeAttempts)
-	}
-	if gen.calls != maxCodeAttempts {
-		t.Errorf("NextSequence calls = %d, want %d (bounded retries)", gen.calls, maxCodeAttempts)
 	}
 }
 
@@ -157,8 +160,15 @@ func TestShortenInvalidURLPassthrough(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// "No sequence burned" is asserted by BEHAVIOR, not by counting
+			// calls (ADR-002): the fake generator fails on its FIRST call,
+			// so if the use case consumed a sequence before validating, the
+			// returned error would be the generator's, not the domain's.
+			// errors.Is(err, wantErr) therefore proves validation happens
+			// before generation.
+			genErr := errors.New("sequence source must not be reached")
 			repo := &fakeRepo{}
-			gen := &fakeSequences{values: []uint64{1}}
+			gen := &fakeSequences{err: genErr}
 			uc := NewUseCase(repo, gen, "https://sho.rt")
 
 			res, err := uc.Shorten(context.Background(), tc.longURL)
@@ -166,14 +176,14 @@ func TestShortenInvalidURLPassthrough(t *testing.T) {
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Shorten(%q) error = %v, want errors.Is %v", tc.longURL, err, tc.wantErr)
 			}
+			if errors.Is(err, genErr) {
+				t.Fatalf("Shorten(%q) reached the sequence source before validating", tc.longURL)
+			}
 			if res != (Result{}) {
 				t.Errorf("rejected input must yield zero Result, got %+v", res)
 			}
 			if len(repo.saved) != 0 {
 				t.Errorf("rejected input persisted %d rows, want 0", len(repo.saved))
-			}
-			if gen.calls != 0 {
-				t.Errorf("rejected input consumed %d sequences, want 0", gen.calls)
 			}
 		})
 	}

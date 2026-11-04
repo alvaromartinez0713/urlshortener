@@ -8,18 +8,17 @@ import (
 	"urlshortener/internal/shorturl"
 )
 
-// fakeFinder is a deterministic Finder stub: FindByCode returns the
-// configured target and error, and records call count so tests can prove
-// the use case did or did not reach the port. Pure stdlib — proves the
-// use case tests run without Docker or network (S5.5).
+// fakeFinder is a deterministic Finder fake: FindByCode returns the
+// configured target and error. It holds no call counter — interactions are
+// asserted through behavior (what the use case returns given what the fake
+// would answer), never through spying on the port (ADR-002). Pure stdlib —
+// proves the use case tests run without Docker or network (S5.5).
 type fakeFinder struct {
 	target string
 	err    error
-	calls  int
 }
 
 func (f *fakeFinder) FindByCode(ctx context.Context, code string) (string, error) {
-	f.calls++
 	return f.target, f.err
 }
 
@@ -36,9 +35,6 @@ func TestRedirectSuccessReturnsStoredTarget(t *testing.T) {
 	}
 	if target != "https://example.com/a/b?q=1#frag" {
 		t.Errorf("target = %q, want the stored long URL unchanged", target)
-	}
-	if finder.calls != 1 {
-		t.Errorf("FindByCode calls = %d, want 1", finder.calls)
 	}
 }
 
@@ -94,7 +90,11 @@ func TestRedirectImpossibleCodeRejectedWithoutPortCall(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			finder := &fakeFinder{}
+			// "The port is not reached" is asserted by BEHAVIOR, not by a
+			// call counter (ADR-002): the fake finder is configured to
+			// SUCCEED if it were reached, so only the use case's fast path
+			// can produce ErrNotFound for an impossible code.
+			finder := &fakeFinder{target: "PORT-MUST-NOT-BE-REACHED"}
 			uc := NewUseCase(finder)
 
 			target, err := uc.Redirect(context.Background(), tc.code)
@@ -104,9 +104,6 @@ func TestRedirectImpossibleCodeRejectedWithoutPortCall(t *testing.T) {
 			}
 			if target != "" {
 				t.Errorf("target = %q, want empty on failure", target)
-			}
-			if finder.calls != 0 {
-				t.Errorf("FindByCode calls = %d, want 0 (impossible codes must not reach the port)", finder.calls)
 			}
 		})
 	}
