@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -134,7 +135,7 @@ func newE2ERouter(t *testing.T) (http.Handler, *pgxpool.Pool) {
 	shortenUseCase := shorten.NewUseCase(adapter, adapter, "http://localhost:8080")
 	redirectUseCase := redirect.NewUseCase(adapter)
 
-	router := api.NewRouter()
+	router := api.NewRouter(slog.Default())
 	api.MountShorten(router, shorten.NewHandler(shortenUseCase))
 	api.MountRedirect(router, redirect.NewHandler(redirectUseCase))
 	return router, pool

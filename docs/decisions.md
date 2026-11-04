@@ -8,6 +8,7 @@ routine choices stay in code comments and PR descriptions.
 | ------- | ---------------------------------------------- | -------- | ---------- |
 | ADR-001 | Stack and architecture of the URL shortener v1 | Accepted | 2026-11-03 |
 | ADR-002 | Testing pillars and conventions                | Accepted | 2026-11-03 |
+| ADR-003 | Centralized error handling and structured logging | Accepted | 2026-11-04 |
 
 ## ADR-001: Stack and architecture of the URL shortener v1
 
@@ -137,3 +138,94 @@ slices.
 - ADR-001 (hexagonal ports and the S5.5 testing contract)
 - `internal/shorten/usecase_test.go`, `internal/redirect/usecase_test.go`
   (fakes and behavior-only assertions in practice)
+
+## ADR-003: Centralized error handling and structured logging
+
+Status: Accepted — 2026-11-04
+
+### Context
+
+The T7 quality review left every handler rendering its own problems and logging
+nothing: whether an error reached the logs depended on each handler remembering
+to do it, and nothing prevented internal error text from leaking into a
+response. The user made both concerns explicit (Spec S13, Log L12): "que se
+debe mostrar al usuario final y que se debe loggear para que el equipo entienda
+los errores y el usuario final solo ve un mensaje bien mapeado". There are two
+audiences for every failure — the user, who needs a mapped, safe message, and
+the team, who needs the full internal chain plus request context — and the two
+must never be conflated.
+
+### Decisions
+
+- **One choke point: an error middleware renders and logs every failure**
+  (S13). Handlers attach errors via gin's `c.Error()` with an
+  `httpx.ProblemError` and return — they contain no error rendering and no
+  error logging. `internal/api/middleware.ErrorHandler` is the single place
+  that renders error responses and emits error records, so a handler cannot
+  forget to log, and nothing can leak internals by accident. Success bodies
+  (201 JSON, 301 redirect) remain the only responses handlers write.
+- **Two-audiences contract in `httpx.ProblemError`** (S13). It wraps the
+  ready-to-render RFC 9457 `Problem` plus the original `cause`. Its `Error()`
+  is the user-safe mapped detail — the only text that can ever reach the
+  response. The internal chain travels solely via `Unwrap()` and reaches only
+  the logs. Slice-local `problemFor` mappings keep their per-slice error
+  semantics (S9, S5.4) and now return `*httpx.ProblemError`.
+- **Error taxonomy: client-class (4xx) is WARN, infrastructure (5xx) is
+  ERROR** (S13). A 4xx is expected traffic (bad input, unknown code): useful
+  at WARN, not an incident. A 5xx is a broken dependency or bug: ERROR. Plain
+  (non-Problem) errors of unknown provenance are ERROR and render the generic
+  500 problem — when we cannot vouch for what an error contains, the user
+  gets nothing internal.
+- **Log fields: method, path, status, mapped detail, full cause chain.** The
+  chain is unwrapped layer by layer (not `fmt %v`, which prints only the
+  outermost message), so `ProblemError detail: domain error: pgx error` is all
+  visible at the error site. If a response was already written (an error
+  attached after `c.Redirect`), the middleware logs but never double-renders.
+- **`log/slog` with a JSON handler over stdout** (S13). Standard library:
+  structured, one record per line, zero new dependencies. JSON over text
+  because these records are for machines and aggregators first (`jq`-able
+  without parsing prose); humans read them through tools, not the raw stream.
+  The `*slog.Logger` is constructed in the composition root and injected via
+  `api.NewRouter(logger)` — logging config is deployment plumbing, like the
+  database URL. `gin.Logger()` is replaced by `middleware.RequestLogger` (one
+  INFO line per request: method, path, status, latency, client IP);
+  `gin.Recovery()` is kept as the OUTERMOST panic barrier — a panic becomes a
+  500 and a stack trace in Recovery's own log before any other middleware
+  inspects the request (Recovery never attaches a `c.Error`).
+- **Middleware order: Recovery → ErrorHandler → RequestLogger**, outermost
+  first. Recovery must contain panics before anyone else looks; the error
+  handler must see every error attached below it; the access logger sits
+  innermost so its latency measures the application chain and its INFO line
+  precedes the error record of the same request (chronological correlation).
+  NoRoute writes its 404 problem directly — there is nothing to classify, so
+  no double render.
+- **Middleware lives in `internal/api/middleware`** (a subpackage of the api
+  layer). Slice-internal tests (`package shorten`) wire the real
+  `ErrorHandler` into their test routers; a subpackage keeps that legal
+  without an import cycle (the `api` package imports the slices).
+
+### Consequences and trade-offs
+
+- **Handlers cannot forget to log or leak.** The choke point enforces the
+  contract structurally; the cost is one indirection when reading a handler
+  (the response for an error lives in the middleware, not the handler).
+- **Mapped details are user-safe by review, not by construction.**
+  `problemFor` chooses the detail string; a careless future mapping could put
+  internals in `Problem.Detail`. The middleware cannot catch that — it is a
+  slice-review responsibility (S9's single-mapping-per-slice rule keeps the
+  surface small).
+- **Panics keep gin.Recovery's bodyless 500.** Recovery answers 500 with no
+  JSON body; upgrading that to a problem document would mean replacing
+  Recovery — deliberately out of scope for v1 (S8's bar is "no panics reach
+  users", which Recovery meets).
+- **Gin's `c.Errors` becomes the handler↔middleware contract.** It is
+  framework-coupled by design: error attachment is transport concern,
+  exactly where Gin belongs (S5.1).
+
+### References
+
+- `odd/tasks/urlshortener-mvp.md` (Spec S13, S8, S9; Log L12; task T12)
+- ADR-001 (hexagonal boundary: middleware is adapter-side), ADR-002
+  (behavior-only tests for the middleware contract)
+- `internal/api/middleware/middleware.go` (the choke point),
+  `internal/platform/httpx/problemerror.go` (the two-audiences wrapper)

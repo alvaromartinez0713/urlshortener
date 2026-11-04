@@ -2,17 +2,28 @@ package shorten
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"urlshortener/internal/api/middleware"
 	"urlshortener/internal/platform/httpx"
 )
 
-// postShorten issues a POST /shorten against a Gin engine wired with the
-// handler under test and returns the recorder.
+// testLogger discards log output: these tests pin the HTTP contract, not
+// the log stream (the middleware's records have their own tests).
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// postShorten issues a POST /shorten against a Gin engine wired like the
+// composition root's stack (error middleware + handler) and returns the
+// recorder. The response contract asserted below is identical before and
+// after S13 (handlers attach, middleware renders) — behavior lock.
 func postShorten(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	uc := NewUseCase(&fakeRepo{}, &fakeSequences{values: []uint64{62}}, "https://sho.rt")
@@ -23,6 +34,7 @@ func postShortenWith(t *testing.T, uc *UseCase, body string) *httptest.ResponseR
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	router.Use(middleware.ErrorHandler(testLogger()))
 	router.POST("/shorten", NewHandler(uc).Shorten)
 
 	rec := httptest.NewRecorder()

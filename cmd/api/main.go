@@ -6,7 +6,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,12 +23,18 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatal(err)
+	// S13: one structured logger for the whole process. JSON handler over
+	// stdout: log aggregators and `jq` consume it without extra
+	// dependencies, one record per line, and the standard library's
+	// log/slog needs no third-party logging package (ADR-003).
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if err := run(logger); err != nil {
+		logger.Error("api: fatal", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -67,7 +73,7 @@ func run() error {
 	shortenUseCase := shorten.NewUseCase(adapter, adapter, baseURL)
 	redirectUseCase := redirect.NewUseCase(adapter)
 
-	router := api.NewRouter()
+	router := api.NewRouter(logger)
 	api.MountShorten(router, shorten.NewHandler(shortenUseCase))
 	api.MountRedirect(router, redirect.NewHandler(redirectUseCase))
 
@@ -82,7 +88,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("api listening on %s", srv.Addr)
+		logger.Info("api listening", slog.String("addr", srv.Addr))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -98,7 +104,7 @@ func run() error {
 	case <-stop:
 	}
 
-	log.Println("shutting down")
+	logger.Info("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(ctx)

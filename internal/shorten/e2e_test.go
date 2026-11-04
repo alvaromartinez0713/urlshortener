@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -126,7 +127,7 @@ func newE2ERouter(t *testing.T) (http.Handler, *pgxpool.Pool) {
 	adapter := postgres.New(pool)
 	useCase := shorten.NewUseCase(adapter, adapter, "http://localhost:8080")
 
-	router := api.NewRouter()
+	router := api.NewRouter(slog.Default())
 	api.MountShorten(router, shorten.NewHandler(useCase))
 	return router, pool
 }

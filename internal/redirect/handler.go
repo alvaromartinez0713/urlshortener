@@ -29,8 +29,11 @@ func NewHandler(uc *UseCase) *Handler {
 //   - 500 problem details for infrastructure failures — internal error
 //     text never reaches the user (S8).
 //
-// Every problem answer is rendered by the shared httpx builder (S9);
-// only the error→problem mapping below is slice-owned.
+// S13: the handler renders NO error responses. Failures are attached via
+// c.Error() as an httpx.ProblemError and the handler returns; the error
+// middleware (internal/api) is the single place that renders the problem
+// and logs the failure with the full cause chain. The 301 below is the
+// only response a handler writes.
 //
 // 301 vs 302, documented: S2 mandates a permanent redirect. 301 lets
 // browsers and proxies cache the mapping, which is correct for v1 because
@@ -47,7 +50,7 @@ func NewHandler(uc *UseCase) *Handler {
 func (h *Handler) Redirect(c *gin.Context) {
 	su, err := h.uc.Redirect(c.Request.Context(), c.Param("code"))
 	if err != nil {
-		httpx.WriteProblem(c, problemFor(err))
+		_ = c.Error(problemFor(err))
 		return
 	}
 
@@ -57,21 +60,24 @@ func (h *Handler) Redirect(c *gin.Context) {
 // problemFor is THE single domain-error → HTTP mapping of the redirect
 // slice (S9). Per-slice by design (S5.4): ErrNotFound is a redirect-slice
 // value; the shared httpx package renders, it never imports slice errors.
-func problemFor(err error) httpx.Problem {
+// It returns an httpx.ProblemError (S13): the Problem is user-safe and is
+// rendered by the error middleware; the original error travels as the
+// cause and reaches only the logs, never the user.
+func problemFor(err error) *httpx.ProblemError {
 	switch {
 	case errors.Is(err, ErrNotFound):
-		return httpx.Problem{
+		return httpx.NewProblemError(httpx.Problem{
 			Status: http.StatusNotFound,
 			Type:   httpx.TypeURI("unknown-code"),
 			Detail: "the requested short code does not exist",
-		}
+		}, err)
 	default:
 		// Infrastructure failure: generic treatment, no internals
 		// leaked (S8).
-		return httpx.Problem{
+		return httpx.NewProblemError(httpx.Problem{
 			Status: http.StatusInternalServerError,
 			Type:   httpx.TypeURI("internal-error"),
 			Detail: "the request could not be processed at this time",
-		}
+		}, err)
 	}
 }
