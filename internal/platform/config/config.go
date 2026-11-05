@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 // Config holds process-level settings. It is constructed only in the
@@ -23,6 +24,16 @@ type Config struct {
 	// It defaults to "http://localhost:"+Port; the default depends on
 	// Port, so it is built here in Load, the one place that sees both.
 	BaseURL string
+	// CacheTTL is the expiry of in-memory redirect-cache entries (S28):
+	// CACHE_TTL, a Go duration string ("5m", "90s", ...), default 5m.
+	// Codes are immutable in v1 (S2), so the TTL bounds MEMORY, not
+	// consistency — no invalidation exists or is needed.
+	CacheTTL time.Duration
+	// CacheMaxEntries is the hard cap on cached codes (S28):
+	// CACHE_MAX_ENTRIES, a positive integer, default 10000. Zero and
+	// negative caps are garbage (the cache could hold nothing) and fail
+	// Load — the same fail-early rule as PORT (S23).
+	CacheMaxEntries int
 }
 
 // Load reads configuration from the environment. Missing required values are
@@ -43,6 +54,22 @@ func Load() (Config, error) {
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("config: DATABASE_URL is required")
 	}
+
+	// Cache knobs (S28) come from the same single env reader (S14).
+	ttl, err := time.ParseDuration(envOr("CACHE_TTL", "5m"))
+	if err != nil {
+		return Config{}, fmt.Errorf("config: CACHE_TTL is not a valid duration: %w", err)
+	}
+	maxEntries, err := strconv.Atoi(envOr("CACHE_MAX_ENTRIES", "10000"))
+	if err != nil {
+		return Config{}, fmt.Errorf("config: CACHE_MAX_ENTRIES is not a number")
+	}
+	if maxEntries <= 0 {
+		return Config{}, fmt.Errorf("config: CACHE_MAX_ENTRIES %d must be positive", maxEntries)
+	}
+	cfg.CacheTTL = ttl
+	cfg.CacheMaxEntries = maxEntries
+
 	return cfg, nil
 }
 
