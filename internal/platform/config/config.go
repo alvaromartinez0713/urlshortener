@@ -2,7 +2,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"strconv"
 )
 
 // Config holds process-level settings. It is constructed only in the
@@ -24,10 +26,17 @@ type Config struct {
 }
 
 // Load reads configuration from the environment. Missing required values are
-// an error: the process refuses to start half-configured.
+// an error: the process refuses to start half-configured (S23: also a
+// malformed PORT — failing at Listen would detach the failure from its
+// cause).
 func Load() (Config, error) {
+	port := envOr("PORT", "8080")
+	if err := validatePort(port); err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
-		Port:        envOr("PORT", "8080"),
+		Port:        port,
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 	}
 	cfg.BaseURL = envOr("BASE_URL", "http://localhost:"+cfg.Port)
@@ -35,6 +44,21 @@ func Load() (Config, error) {
 		return Config{}, errors.New("config: DATABASE_URL is required")
 	}
 	return cfg, nil
+}
+
+// validatePort accepts a usable TCP listen port: a decimal integer in
+// [1, 65535]. Port 0 would make the OS assign a random port — fine for
+// ephemeral services, wrong for a configured deployment whose BaseURL
+// must match, so it is rejected.
+func validatePort(port string) error {
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("config: PORT %q is not a number", port)
+	}
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("config: PORT %q is outside the valid range 1-65535", port)
+	}
+	return nil
 }
 
 func envOr(key, fallback string) string {

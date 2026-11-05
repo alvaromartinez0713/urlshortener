@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -45,6 +46,30 @@ type Repository struct {
 // New constructs the adapter over an established pool.
 func New(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
+}
+
+// Connect establishes the pool over databaseURL (S20): this package owns
+// ALL Postgres infrastructure, pool construction included — the
+// composition root orchestrates but never touches pgx directly.
+//
+// Real per-query timeouts (S20): statement_timeout is set as a
+// server-side runtime param on EVERY connection, so a hung query is
+// terminated by Postgres instead of running unbounded. ctx bounds only
+// the connect/initialization phase; callers give it its own deadline,
+// separate from any migration budget.
+func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: parse database url: %w", err)
+	}
+	// 10s is far above every legitimate query in this schema (single-row
+	// SELECT/INSERT, goose DDL) and far below a hung-forever query.
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = "10000"
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: connect: %w", err)
+	}
+	return pool, nil
 }
 
 // Save implements shorten.Repository: one INSERT, nothing else.
@@ -84,11 +109,16 @@ func (r *Repository) Save(ctx context.Context, su shorturl.ShortURL) error {
 // insert. Prefer simple uniqueness.
 //
 // The port signature is context-free (domain decision, S5.1: the domain
-// imports no context plumbing); the adapter runs against a background
-// context. The pool carries per-query timeouts.
+// imports no context plumbing); the adapter runs it under its own SHORT
+// deadline — a fresh background-derived context, NOT the bare
+// context.Background() a previous version used, which made a hung
+// sequence query uncancelable and unbounded. The pool's server-side
+// statement_timeout (Connect, S20) is the second line of defense.
 func (r *Repository) NextSequence() (uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	var seq uint64
-	err := r.pool.QueryRow(context.Background(), `SELECT nextval('urls_id_seq')`).Scan(&seq)
+	err := r.pool.QueryRow(ctx, `SELECT nextval('urls_id_seq')`).Scan(&seq)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: next sequence: %w", err)
 	}

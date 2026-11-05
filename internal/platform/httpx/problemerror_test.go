@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -44,7 +45,9 @@ func TestProblemErrorCarriesProblem(t *testing.T) {
 	p := Problem{Status: 422, Type: TypeURI("invalid-url"), Detail: "url must be absolute"}
 	pe := NewProblemError(p, errors.New("url must be absolute"))
 
-	if pe.Problem != p {
+	// DeepEqual (not ==): Problem carries an extensions map (S21), which
+	// is not comparable with the == operator.
+	if !reflect.DeepEqual(pe.Problem, p) {
 		t.Errorf("pe.Problem = %+v, want %+v", pe.Problem, p)
 	}
 }

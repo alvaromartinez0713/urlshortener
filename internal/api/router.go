@@ -35,14 +35,14 @@ import (
 //     has rendered the response, and therefore records the FINAL status
 //     of every request (an error response logged as 200 would make the
 //     access log useless for the team).
-//  3. middleware.ErrorHandler — INNERMOST, the SINGLE error choke point:
+//  3. middleware.ProblemRenderer — INNERMOST, the SINGLE error choke point:
 //     renders every error response and logs every failure (method, path,
 //     status, mapped detail, full cause chain) before the access line is
 //     written. Being innermost also lets it see every error attached by
 //     the handlers it wraps.
 func NewRouter(logger *slog.Logger) *gin.Engine {
 	router := gin.New()
-	router.Use(gin.Recovery(), middleware.RequestLogger(logger), middleware.ErrorHandler(logger))
+	router.Use(gin.Recovery(), middleware.RequestLogger(logger), middleware.ProblemRenderer(logger))
 
 	router.GET("/healthz", handleHealthz)
 

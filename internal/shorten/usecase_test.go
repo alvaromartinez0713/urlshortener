@@ -56,21 +56,19 @@ func (f *fakeRepo) Save(ctx context.Context, su shorturl.ShortURL) error {
 func TestShortenSuccess(t *testing.T) {
 	repo := &fakeRepo{}
 	gen := &fakeSequences{values: []uint64{0}}
-	uc := NewUseCase(repo, gen, "https://sho.rt")
+	uc := NewUseCase(repo, gen)
 
-	res, err := uc.Shorten(context.Background(), "https://example.com/a/b?q=1")
+	su, err := uc.Shorten(context.Background(), "https://example.com/a/b?q=1")
 
 	if err != nil {
 		t.Fatalf("Shorten unexpected error: %v", err)
 	}
-	if res.Code != "0" {
-		t.Errorf("res.Code = %q, want %q", res.Code, "0")
+	// S15: the use case returns the ENTITY; no presentation fields.
+	if su.Code() != "0" {
+		t.Errorf("su.Code() = %q, want %q", su.Code(), "0")
 	}
-	if res.ShortURL != "https://sho.rt/0" {
-		t.Errorf("res.ShortURL = %q, want %q", res.ShortURL, "https://sho.rt/0")
-	}
-	if res.LongURL != "https://example.com/a/b?q=1" {
-		t.Errorf("res.LongURL = %q, want the validated target", res.LongURL)
+	if su.Target() != "https://example.com/a/b?q=1" {
+		t.Errorf("su.Target() = %q, want the validated target", su.Target())
 	}
 	if len(repo.saved) != 1 {
 		t.Fatalf("Save calls = %d, want 1", len(repo.saved))
@@ -81,41 +79,24 @@ func TestShortenSuccess(t *testing.T) {
 	}
 }
 
-func TestShortenBaseURLTrailingSlashIsTrimmed(t *testing.T) {
-	uc := NewUseCase(&fakeRepo{}, &fakeSequences{values: []uint64{62}}, "https://sho.rt/")
-
-	res, err := uc.Shorten(context.Background(), "https://example.com")
-
-	if err != nil {
-		t.Fatalf("Shorten unexpected error: %v", err)
-	}
-	if res.ShortURL != "https://sho.rt/10" {
-		t.Errorf("res.ShortURL = %q, want %q (no double slash)", res.ShortURL, "https://sho.rt/10")
-	}
-}
-
 func TestShortenCollisionRetriesThenSucceeds(t *testing.T) {
 	// S3: a unique violation on code triggers a new sequence and a new
 	// code; the second attempt succeeds.
 	repo := &fakeRepo{saveErrs: []error{ErrCodeCollision}}
 	gen := &fakeSequences{values: []uint64{1, 2}}
-	uc := NewUseCase(repo, gen, "https://sho.rt")
+	uc := NewUseCase(repo, gen)
 
-	res, err := uc.Shorten(context.Background(), "https://example.com")
+	su, err := uc.Shorten(context.Background(), "https://example.com")
 
 	if err != nil {
 		t.Fatalf("Shorten unexpected error: %v", err)
 	}
-	if res.Code != "2" {
-		t.Errorf("res.Code = %q, want %q (code from the retried sequence)", res.Code, "2")
+	if su.Code() != "2" {
+		t.Errorf("su.Code() = %q, want %q (code from the retried sequence)", su.Code(), "2")
 	}
-	// Behavior, not interaction counts (ADR-002): the code from the
-	// retried sequence is the one that ends up persisted, after the
-	// collided first attempt. repo.saved is the fake repo's effect log —
-	// the port's observable effect, not a spy.
-	if repo.saved[0].Code() != "1" {
-		t.Errorf("first attempt persisted code %q, want %q", repo.saved[0].Code(), "1")
-	}
+	// Behavior (ADR-002): the code from the RETRIED sequence is the one
+	// that ends up persisted — the final persisted state, not the failed
+	// attempt's internals (S22).
 	if last := repo.saved[len(repo.saved)-1]; last.Code() != "2" {
 		t.Errorf("successful attempt persisted code %q, want %q (the retried sequence)", last.Code(), "2")
 	}
@@ -132,15 +113,15 @@ func TestShortenExhaustedRetries(t *testing.T) {
 	// ErrCodeGenerationExhausted and fail this test.
 	repo := &fakeRepo{saveErrs: []error{ErrCodeCollision, ErrCodeCollision, ErrCodeCollision}}
 	gen := &fakeSequences{values: []uint64{1, 2, 3}}
-	uc := NewUseCase(repo, gen, "https://sho.rt")
+	uc := NewUseCase(repo, gen)
 
-	res, err := uc.Shorten(context.Background(), "https://example.com")
+	su, err := uc.Shorten(context.Background(), "https://example.com")
 
 	if !errors.Is(err, ErrCodeGenerationExhausted) {
 		t.Fatalf("Shorten error = %v, want errors.Is ErrCodeGenerationExhausted", err)
 	}
-	if res != (Result{}) {
-		t.Errorf("exhausted retries must yield zero Result, got %+v", res)
+	if su != (shorturl.ShortURL{}) {
+		t.Errorf("exhausted retries must yield zero entity, got %+v", su)
 	}
 }
 
@@ -169,9 +150,9 @@ func TestShortenInvalidURLPassthrough(t *testing.T) {
 			genErr := errors.New("sequence source must not be reached")
 			repo := &fakeRepo{}
 			gen := &fakeSequences{err: genErr}
-			uc := NewUseCase(repo, gen, "https://sho.rt")
+			uc := NewUseCase(repo, gen)
 
-			res, err := uc.Shorten(context.Background(), tc.longURL)
+			su, err := uc.Shorten(context.Background(), tc.longURL)
 
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Shorten(%q) error = %v, want errors.Is %v", tc.longURL, err, tc.wantErr)
@@ -179,8 +160,8 @@ func TestShortenInvalidURLPassthrough(t *testing.T) {
 			if errors.Is(err, genErr) {
 				t.Fatalf("Shorten(%q) reached the sequence source before validating", tc.longURL)
 			}
-			if res != (Result{}) {
-				t.Errorf("rejected input must yield zero Result, got %+v", res)
+			if su != (shorturl.ShortURL{}) {
+				t.Errorf("rejected input must yield zero entity, got %+v", su)
 			}
 			if len(repo.saved) != 0 {
 				t.Errorf("rejected input persisted %d rows, want 0", len(repo.saved))
@@ -193,15 +174,15 @@ func TestShortenGeneratorErrorPassthrough(t *testing.T) {
 	genErr := errors.New("sequence source down")
 	repo := &fakeRepo{}
 	gen := &fakeSequences{err: genErr}
-	uc := NewUseCase(repo, gen, "https://sho.rt")
+	uc := NewUseCase(repo, gen)
 
-	res, err := uc.Shorten(context.Background(), "https://example.com")
+	su, err := uc.Shorten(context.Background(), "https://example.com")
 
 	if !errors.Is(err, genErr) {
 		t.Fatalf("Shorten error = %v, want errors.Is %v", err, genErr)
 	}
-	if res != (Result{}) {
-		t.Errorf("generator failure must yield zero Result, got %+v", res)
+	if su != (shorturl.ShortURL{}) {
+		t.Errorf("generator failure must yield zero entity, got %+v", su)
 	}
 	if len(repo.saved) != 0 {
 		t.Errorf("generator failure persisted %d rows, want 0", len(repo.saved))
@@ -215,14 +196,14 @@ func TestShortenRepositoryErrorPassthrough(t *testing.T) {
 	repoErr := errors.New("connection refused")
 	repo := &fakeRepo{saveErrs: []error{repoErr}}
 	gen := &fakeSequences{values: []uint64{1}}
-	uc := NewUseCase(repo, gen, "https://sho.rt")
+	uc := NewUseCase(repo, gen)
 
-	res, err := uc.Shorten(context.Background(), "https://example.com")
+	su, err := uc.Shorten(context.Background(), "https://example.com")
 
 	if !errors.Is(err, repoErr) {
 		t.Fatalf("Shorten error = %v, want errors.Is %v", err, repoErr)
 	}
-	if res != (Result{}) {
-		t.Errorf("repository failure must yield zero Result, got %+v", res)
+	if su != (shorturl.ShortURL{}) {
+		t.Errorf("repository failure must yield zero entity, got %+v", su)
 	}
 }

@@ -8,6 +8,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -38,53 +39,77 @@ import (
 // failure that happens before anything else could log. It also makes
 // slog.Default() usable by anything deeper in the process.
 func Run() error {
-	// S13: one structured logger for the whole process. JSON handler over
-	// stdout: log aggregators and `jq` consume it without extra
-	// dependencies, one record per line, and the standard library's
-	// log/slog needs no third-party logging package (ADR-003).
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
+	logger := newLogger()
 
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 
-	// Config.BaseURL (S14) now carries the public origin of short URLs;
-	// it is read only in internal/platform/config and flows into the use
-	// case as a plain string (see shorten.NewUseCase for why it is not a
-	// port).
-
-	// Database pool: established with a hard 5s budget — a database that
-	// takes longer is down for startup purposes; fail fast and let the
-	// supervisor restart.
-	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelConnect()
-	pool, err := pgxpool.New(connectCtx, cfg.DatabaseURL)
+	pool, err := connectDatabase(cfg.DatabaseURL)
 	if err != nil {
-		return errors.New("api: could not connect to database: " + err.Error())
+		return err
 	}
 	defer pool.Close()
 
-	if err := postgres.RunMigrations(connectCtx, pool); err != nil {
-		return err
+	router := buildRouter(logger, pool, cfg.BaseURL)
+	return serve(logger, router, cfg.Port)
+}
+
+// newLogger builds the structured JSON logger and installs it as the
+// process default (S13, ADR-003). It is Run's FIRST step so cmd/api's
+// fatal log line already uses the JSON logger even on early failures.
+func newLogger() *slog.Logger {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+	return logger
+}
+
+// connectDatabase owns the DATABASE PHASE (S20): connect with a hard 5s
+// budget (a database that takes longer is down for startup purposes —
+// fail fast and let the supervisor restart), then migrations under their
+// OWN deadline. One shared context was a real bug: a database that
+// connected at 4.9s left migrations a ~0.1s budget and spurious startup
+// failures. Wrapping uses %w so callers can errors.Is/As through it (S20).
+func connectDatabase(databaseURL string) (*pgxpool.Pool, error) {
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelConnect()
+	pool, err := postgres.Connect(connectCtx, databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("api: could not connect to database: %w", err)
 	}
 
-	// Composition: the ONE postgres adapter implements every core-owned
-	// port (shorten.Repository + shorturl.CodeGenerator + redirect.Finder);
-	// they stay separate port types so the slices never know the
-	// capabilities share a connection pool.
+	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelMigrate()
+	if err := postgres.RunMigrations(migrateCtx, pool); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("api: could not run migrations: %w", err)
+	}
+	return pool, nil
+}
+
+// buildRouter composes the application: the ONE postgres adapter
+// implements every core-owned port (shorten.Repository +
+// shorturl.CodeGenerator + redirect.Finder); they stay separate port
+// types so the slices never know the capabilities share a connection
+// pool (S5.2).
+func buildRouter(logger *slog.Logger, pool *pgxpool.Pool, baseURL string) http.Handler {
 	adapter := postgres.New(pool)
-	shortenUseCase := shorten.NewUseCase(adapter, adapter, cfg.BaseURL)
+	shortenUseCase := shorten.NewUseCase(adapter, adapter)
 	redirectUseCase := redirect.NewUseCase(adapter)
 
 	router := api.NewRouter(logger)
-	api.MountShorten(router, shorten.NewHandler(shortenUseCase))
+	api.MountShorten(router, shorten.NewHandler(shortenUseCase, baseURL))
 	api.MountRedirect(router, redirect.NewHandler(redirectUseCase))
+	return router
+}
 
+// serve runs the HTTP server until SIGINT/SIGTERM or a listen error, and
+// shuts down gracefully within a 10s budget.
+func serve(logger *slog.Logger, handler http.Handler, port string) error {
 	srv := &http.Server{
-		Addr:              ":" + cfg.Port,
-		Handler:           router,
+		Addr:              ":" + port,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -99,7 +124,6 @@ func Run() error {
 		}
 	}()
 
-	// Graceful shutdown on SIGINT/SIGTERM.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
