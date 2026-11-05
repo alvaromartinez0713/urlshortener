@@ -21,15 +21,9 @@ import (
 	"urlshortener/internal/platform/httpx"
 )
 
-// genericInternalProblem is the problem rendered for PLAIN (non-Problem)
-// errors: their provenance is unknown, so nothing but this generic
-// document may reach the user (S13; same default the slices use for
-// unclassified failures).
-var genericInternalProblem = httpx.Problem{
-	Status: http.StatusInternalServerError,
-	Type:   httpx.TypeURI("internal-error"),
-	Detail: "the request could not be processed at this time",
-}
+// The generic 500 problem for plain (non-Problem) errors is httpx's
+// canonical shape (S17): their provenance is unknown, so nothing but the
+// generic document may reach the user (S13).
 
 // ErrorHandler is the centralized error middleware (S13, ADR-003). After
 // the handler chain returns it inspects gin's attached errors (c.Error):
@@ -69,11 +63,11 @@ func ErrorHandler(logger *slog.Logger) gin.HandlerFunc {
 			return
 		}
 
-		// Plain error of unknown provenance: generic 500 for the user,
-		// full chain for the team (S13).
-		logFailure(c, logger, genericInternalProblem.Status, err)
+		// Plain error of unknown provenance: the canonical generic 500
+		// for the user (S17), full chain for the team (S13).
+		logFailure(c, logger, http.StatusInternalServerError, err)
 		if !c.Writer.Written() {
-			httpx.WriteProblem(c, genericInternalProblem)
+			httpx.WriteProblem(c, httpx.GenericInternalProblem())
 		}
 	}
 }

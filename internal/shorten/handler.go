@@ -1,14 +1,12 @@
 package shorten
 
 import (
-	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"urlshortener/internal/platform/httpx"
-	"urlshortener/internal/shorturl"
 )
 
 // Handler is the HTTP adapter of the shorten slice (S5.3): it translates
@@ -75,45 +73,4 @@ func (h *Handler) Shorten(c *gin.Context) {
 		"code":      su.Code(),
 		"short_url": h.baseURL + "/" + su.Code(),
 	})
-}
-
-// isInvalidInput reports whether err is a client-input error: the domain
-// validation errors surfaced by the use case. Scheme rejection is a
-// distinct domain value but still invalid input.
-func isInvalidInput(err error) bool {
-	return errors.Is(err, shorturl.ErrEmptyURL) ||
-		errors.Is(err, shorturl.ErrInvalidURL) ||
-		errors.Is(err, shorturl.ErrInvalidURLScheme)
-}
-
-// problemFor is THE single domain-error → HTTP mapping of the shorten
-// slice (S9). It lives here, not in a shared map, by design (S5.4):
-// the errors it inspects are shorten-slice/domain values; redirect and
-// future slices own their own mappings, while httpx owns only the
-// rendering. It returns an httpx.ProblemError (S13): the Problem is
-// user-safe and gets rendered by the error middleware; the original
-// error travels as the cause and reaches only the logs, never the user.
-func problemFor(err error) *httpx.ProblemError {
-	switch {
-	case isInvalidInput(err):
-		return httpx.NewProblemError(httpx.Problem{
-			Status: http.StatusUnprocessableEntity,
-			Type:   httpx.TypeURI("invalid-url"),
-			Detail: err.Error(),
-		}, err)
-	case errors.Is(err, ErrCodeGenerationExhausted):
-		return httpx.NewProblemError(httpx.Problem{
-			Status: http.StatusInternalServerError,
-			Type:   httpx.TypeURI("code-generation-exhausted"),
-			Detail: "the short code could not be generated at this time",
-		}, err)
-	default:
-		// Infrastructure failure: same generic treatment, no
-		// internals leaked (S8).
-		return httpx.NewProblemError(httpx.Problem{
-			Status: http.StatusInternalServerError,
-			Type:   httpx.TypeURI("internal-error"),
-			Detail: "the request could not be processed at this time",
-		}, err)
-	}
 }

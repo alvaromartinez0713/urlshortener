@@ -84,6 +84,19 @@ func instanceID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// GenericInternalProblem returns THE canonical generic 500 problem (S17):
+// the one shape used for every failure of unknown provenance — plain
+// errors reaching the renderer, and each slice's unclassified default —
+// so the generic internal-error document exists exactly once in the
+// codebase. It returns a fresh value: never mutate the returned Problem.
+func GenericInternalProblem() Problem {
+	return Problem{
+		Status: http.StatusInternalServerError,
+		Type:   TypeURI("internal-error"),
+		Detail: "the request could not be processed at this time",
+	}
+}
+
 // WriteProblem renders p as a COMPLETE RFC 9457 problem details response
 // (S9, S21): Content-Type application/problem+json, the type, title,
 // status, detail and instance members, plus every extension member at

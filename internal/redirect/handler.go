@@ -1,12 +1,9 @@
 package redirect
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-
-	"urlshortener/internal/platform/httpx"
 )
 
 // Handler is the HTTP adapter of the redirect slice (S5.3): it translates
@@ -55,29 +52,4 @@ func (h *Handler) Redirect(c *gin.Context) {
 	}
 
 	c.Redirect(http.StatusMovedPermanently, su.Target())
-}
-
-// problemFor is THE single domain-error → HTTP mapping of the redirect
-// slice (S9). Per-slice by design (S5.4): ErrNotFound is a redirect-slice
-// value; the shared httpx package renders, it never imports slice errors.
-// It returns an httpx.ProblemError (S13): the Problem is user-safe and is
-// rendered by the error middleware; the original error travels as the
-// cause and reaches only the logs, never the user.
-func problemFor(err error) *httpx.ProblemError {
-	switch {
-	case errors.Is(err, ErrNotFound):
-		return httpx.NewProblemError(httpx.Problem{
-			Status: http.StatusNotFound,
-			Type:   httpx.TypeURI("unknown-code"),
-			Detail: "the requested short code does not exist",
-		}, err)
-	default:
-		// Infrastructure failure: generic treatment, no internals
-		// leaked (S8).
-		return httpx.NewProblemError(httpx.Problem{
-			Status: http.StatusInternalServerError,
-			Type:   httpx.TypeURI("internal-error"),
-			Detail: "the request could not be processed at this time",
-		}, err)
-	}
 }

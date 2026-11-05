@@ -114,6 +114,28 @@ func TestShortenHandlerInvalidURLIsProblemDetails422(t *testing.T) {
 	}
 }
 
+// TestShortenHandlerProblemDetailDoesNotEchoInput (S25): the problem
+// detail is a FIXED user-safe message — the offending raw input travels
+// only in the log cause chain, never back in the response body.
+func TestShortenHandlerProblemDetailDoesNotEchoInput(t *testing.T) {
+	rec := postShorten(t, `{"url":"ftp://attacker.example.com/payload"}`)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	httpx.AssertProblem(t, rec, http.StatusUnprocessableEntity, httpx.TypeURI("invalid-url"))
+
+	var body struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
+	}
+	if strings.Contains(body.Detail, "attacker.example.com") {
+		t.Errorf("detail %q echoes the raw user input (S25 violation)", body.Detail)
+	}
+}
+
 func TestShortenHandlerMalformedJSONIs400(t *testing.T) {
 	rec := postShorten(t, `{"url": not json`)
 

@@ -63,6 +63,7 @@ URL shortener learning project (first rung of the learning ladder). Single monol
 - **T21** [S20,S19] Postgres infrastructure consolidation + app split: `postgres.Connect` (pool + statement/query timeouts), migrations with own deadline, `NextSequence` cancellable context, `%w` wrapping; `app.Run` becomes orchestrator over specific functions. commit: `refactor(app): postgres infrastructure ownership and orchestrator run`
 - **T24** [S22] Behavioral assertions in domain and shorten tests. commit: `test: behavior-only assertions in domain and shorten usecase`
 - **T25** [S23] Config tests + PORT validation. commit: `feat(config): validate port and pin database url requirement`
+- **L16** (progress): it.2 implementation log — commits: 7e9d282 (T19 entity return), cdc5b10 (T16 IsPossibleCode), 901823d (T17 RFC 9457 instance+extensions). Slice boundary: 447 authored lines across 3 commits (over the ~400-line review slice); next commits start a fresh review slice. Incident recorded: one commit (80cf065) landed with a red middleware test (pipe swallowed the exit code); fixed immediately (AssertProblem now derives the title from Problem.Title()) and amended into 901823d — final state green.
 
 ## Log
 
