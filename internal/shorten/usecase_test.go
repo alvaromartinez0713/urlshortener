@@ -94,13 +94,9 @@ func TestShortenCollisionRetriesThenSucceeds(t *testing.T) {
 	if su.Code() != "2" {
 		t.Errorf("su.Code() = %q, want %q (code from the retried sequence)", su.Code(), "2")
 	}
-	// Behavior, not interaction counts (ADR-002): the code from the
-	// retried sequence is the one that ends up persisted, after the
-	// collided first attempt. repo.saved is the fake repo's effect log —
-	// the port's observable effect, not a spy.
-	if repo.saved[0].Code() != "1" {
-		t.Errorf("first attempt persisted code %q, want %q", repo.saved[0].Code(), "1")
-	}
+	// Behavior (ADR-002): the code from the RETRIED sequence is the one
+	// that ends up persisted — the final persisted state, not the failed
+	// attempt's internals (S22).
 	if last := repo.saved[len(repo.saved)-1]; last.Code() != "2" {
 		t.Errorf("successful attempt persisted code %q, want %q (the retried sequence)", last.Code(), "2")
 	}
