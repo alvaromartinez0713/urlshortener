@@ -23,6 +23,38 @@ func (f *fakeFinder) FindByCode(ctx context.Context, code string) (shorturl.Shor
 	return f.su, f.err
 }
 
+// fakeCache is a deterministic Cache fake (S26): it behaves as a small
+// map cache with optionally injected Get/Put failures. It holds no call
+// counter — limits are modeled through inputs (getErr/putErr), and
+// interactions are asserted through BEHAVIOR (what the use case returns
+// and what the cache ends up containing), never by spying on the port
+// (ADR-002). Pure stdlib — proves the use case tests run without Docker
+// or network (S5.5).
+type fakeCache struct {
+	entries map[string]shorturl.ShortURL
+	getErr  error // returned by Get, regardless of contents
+	putErr  error // returned by Put; nothing is stored
+}
+
+func (c *fakeCache) Get(ctx context.Context, code string) (shorturl.ShortURL, bool, error) {
+	if c.getErr != nil {
+		return shorturl.ShortURL{}, false, c.getErr
+	}
+	su, ok := c.entries[code]
+	return su, ok, nil
+}
+
+func (c *fakeCache) Put(ctx context.Context, code string, su shorturl.ShortURL) error {
+	if c.putErr != nil {
+		return c.putErr
+	}
+	if c.entries == nil {
+		c.entries = make(map[string]shorturl.ShortURL)
+	}
+	c.entries[code] = su
+	return nil
+}
+
 // mustRehydrate builds a stored entity through the domain's trusted
 // rehydration constructor (S11), failing the test if it refuses.
 func mustRehydrate(t *testing.T, code, target string) shorturl.ShortURL {
@@ -38,10 +70,12 @@ func TestRedirectSuccessReturnsStoredEntity(t *testing.T) {
 	// S11: the read port returns the ShortURL entity, not a raw string.
 	// A code that matches a row resolves to the rehydrated entity whose
 	// Target() is the stored long URL exactly as persisted (S2: GET
-	// /:code redirects to the target).
+	// /:code redirects to the target). The cache starts empty (a miss),
+	// so this is also the canonical MISS → Finder → Put path (S26).
 	want := "https://example.com/a/b?q=1#frag"
 	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
-	uc := NewUseCase(finder)
+	cache := &fakeCache{}
+	uc := NewUseCase(finder, cache)
 
 	su, err := uc.Redirect(context.Background(), "10")
 
@@ -60,7 +94,7 @@ func TestRedirectUnknownCodeIsErrNotFound(t *testing.T) {
 	// A code that matches no row is ErrNotFound (matched via errors.Is),
 	// which the handler maps to 404 (S2).
 	finder := &fakeFinder{err: ErrNotFound}
-	uc := NewUseCase(finder)
+	uc := NewUseCase(finder, &fakeCache{})
 
 	su, err := uc.Redirect(context.Background(), "zzz")
 
@@ -77,7 +111,7 @@ func TestRedirectInfraErrorPropagates(t *testing.T) {
 	// use case must not mask a database outage as a client error.
 	infraErr := errors.New("connection refused")
 	finder := &fakeFinder{err: infraErr}
-	uc := NewUseCase(finder)
+	uc := NewUseCase(finder, &fakeCache{})
 
 	su, err := uc.Redirect(context.Background(), "10")
 
@@ -113,7 +147,7 @@ func TestRedirectImpossibleCodeRejectedWithoutPortCall(t *testing.T) {
 			// SUCCEED if it were reached, so only the use case's fast path
 			// can produce ErrNotFound for an impossible code.
 			finder := &fakeFinder{su: mustRehydrate(t, "10", "PORT-MUST-NOT-BE-REACHED")}
-			uc := NewUseCase(finder)
+			uc := NewUseCase(finder, &fakeCache{})
 
 			su, err := uc.Redirect(context.Background(), tc.code)
 
@@ -124,5 +158,114 @@ func TestRedirectImpossibleCodeRejectedWithoutPortCall(t *testing.T) {
 				t.Errorf("entity = %+v, want the zero value on failure", su)
 			}
 		})
+	}
+}
+
+func TestRedirectCacheHitServesWithoutFinder(t *testing.T) {
+	// S26: on a cache HIT the use case returns the entity WITHOUT calling
+	// the Finder. Asserted behaviorally, not with a call counter (ADR-002):
+	// the fake Finder is configured to FAIL if it were reached, so only
+	// the cache can satisfy the redirect — any Finder touch would surface
+	// as the Finder's error.
+	want := "https://example.com/hit"
+	finder := &fakeFinder{err: errors.New("FINDER MUST NOT BE REACHED ON HIT")}
+	cache := &fakeCache{entries: map[string]shorturl.ShortURL{
+		"10": mustRehydrate(t, "10", want),
+	}}
+	uc := NewUseCase(finder, cache)
+
+	su, err := uc.Redirect(context.Background(), "10")
+
+	if err != nil {
+		t.Fatalf("Redirect unexpected error: %v", err)
+	}
+	if su.Target() != want {
+		t.Errorf("Target() = %q, want the cached long URL %q", su.Target(), want)
+	}
+}
+
+func TestRedirectCacheMissPopulatesCache(t *testing.T) {
+	// S26: on a cache MISS the use case resolves through the Finder and
+	// then Puts the resolved entity into the cache. Asserted behaviorally:
+	// after the call, the cache contains the entity under the code.
+	want := "https://example.com/miss-populates"
+	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
+	cache := &fakeCache{}
+	uc := NewUseCase(finder, cache)
+
+	su, err := uc.Redirect(context.Background(), "10")
+
+	if err != nil {
+		t.Fatalf("Redirect unexpected error: %v", err)
+	}
+	if su.Target() != want {
+		t.Errorf("Target() = %q, want the found long URL %q", su.Target(), want)
+	}
+	cached, ok := cache.entries["10"]
+	if !ok {
+		t.Fatalf("cache after miss = %v, want an entry stored under the code", cache.entries)
+	}
+	if cached != mustRehydrate(t, "10", want) {
+		t.Errorf("cache entry = %+v, want the resolved entity", cached)
+	}
+}
+
+func TestRedirectCacheGetErrorDegradesToFinder(t *testing.T) {
+	// S27: a cache Get error is treated as a MISS — the use case falls
+	// back to the Finder and the redirect still succeeds. A degraded
+	// cache degrades performance, never availability.
+	want := "https://example.com/get-error"
+	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
+	cache := &fakeCache{getErr: errors.New("cache unavailable")}
+	uc := NewUseCase(finder, cache)
+
+	su, err := uc.Redirect(context.Background(), "10")
+
+	if err != nil {
+		t.Fatalf("Redirect unexpected error: %v", err)
+	}
+	if su.Target() != want {
+		t.Errorf("Target() = %q, want the found long URL %q", su.Target(), want)
+	}
+}
+
+func TestRedirectCachePutErrorDoesNotFailRedirect(t *testing.T) {
+	// S27: a cache Put error is ignored — the redirect resolved through
+	// the Finder still succeeds. The cache failure must never fail the
+	// request; the source of truth remains the database.
+	want := "https://example.com/put-error"
+	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
+	cache := &fakeCache{putErr: errors.New("cache write failed")}
+	uc := NewUseCase(finder, cache)
+
+	su, err := uc.Redirect(context.Background(), "10")
+
+	if err != nil {
+		t.Fatalf("Redirect unexpected error: %v", err)
+	}
+	if su.Target() != want {
+		t.Errorf("Target() = %q, want the found long URL %q", su.Target(), want)
+	}
+}
+
+func TestRedirectUnknownCodeDoesNotPopulateCache(t *testing.T) {
+	// S26 + L20: only POSITIVE results are cached — negative caching is
+	// explicitly out of scope. A miss for an unknown code returns
+	// ErrNotFound (S2 semantics unchanged) and leaves the cache empty, so
+	// every probe of a nonexistent code keeps reaching the Finder.
+	finder := &fakeFinder{err: ErrNotFound}
+	cache := &fakeCache{}
+	uc := NewUseCase(finder, cache)
+
+	su, err := uc.Redirect(context.Background(), "zzz")
+
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Redirect error = %v, want errors.Is ErrNotFound", err)
+	}
+	if su != (shorturl.ShortURL{}) {
+		t.Errorf("entity = %+v, want the zero value on failure", su)
+	}
+	if len(cache.entries) != 0 {
+		t.Errorf("cache after unknown code = %v, want it empty (no negative caching)", cache.entries)
 	}
 }

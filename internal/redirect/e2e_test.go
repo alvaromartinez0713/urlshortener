@@ -28,10 +28,33 @@ import (
 	"urlshortener/internal/platform/postgres"
 	"urlshortener/internal/redirect"
 	"urlshortener/internal/shorten"
+	"urlshortener/internal/shorturl"
 	"urlshortener/internal/testsupport"
 
 	pgxpool "github.com/jackc/pgx/v5/pgxpool"
 )
+
+// e2eMissCache is the minimal Cache fake satisfying T26's required cache
+// argument in the e2e wiring. Get always reports a MISS, so every e2e
+// redirect keeps exercising the DATABASE path exactly as before T26; Put
+// stores, exercising the best-effort populate. No error paths. T28
+// replaces this with the real in-memory adapter (T27) and its own
+// behavioral e2e cache proof (redirect, DELETE the row, redirect again).
+type e2eMissCache struct {
+	entries map[string]shorturl.ShortURL
+}
+
+func (c *e2eMissCache) Get(ctx context.Context, code string) (shorturl.ShortURL, bool, error) {
+	return shorturl.ShortURL{}, false, nil
+}
+
+func (c *e2eMissCache) Put(ctx context.Context, code string, su shorturl.ShortURL) error {
+	if c.entries == nil {
+		c.entries = make(map[string]shorturl.ShortURL)
+	}
+	c.entries[code] = su
+	return nil
+}
 
 // newE2ERouter wires the composition root's real dependency chain: ONE
 // postgres adapter implementing every core-owned port (shorten.Repository
@@ -56,7 +79,7 @@ func newE2ERouter(t *testing.T) (http.Handler, *pgxpool.Pool) {
 	adapter := postgres.New(pool)
 
 	shortenUseCase := shorten.NewUseCase(adapter, adapter)
-	redirectUseCase := redirect.NewUseCase(adapter)
+	redirectUseCase := redirect.NewUseCase(adapter, &e2eMissCache{})
 
 	router := api.NewRouter(slog.Default())
 	api.MountShorten(router, shorten.NewHandler(shortenUseCase, "http://localhost:8080"))
