@@ -1,5 +1,9 @@
 package shorturl
 
+import (
+	"strings"
+)
+
 // base62Alphabet is the code alphabet for Base62: digits, then uppercase,
 // then lowercase (0-9, A-Z, a-z). Base 62. Order is part of the public
 // behavior pinned by Base62Encode tests — do not reorder.
@@ -7,6 +11,27 @@ const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 
 // base62Base is the radix of the alphabet.
 const base62Base = uint64(len(base62Alphabet))
+
+// IsPossibleCode reports whether code could have been produced by
+// Base62Encode: non-empty and entirely over base62Alphabet (S16).
+//
+// It is a DOMAIN predicate (S16): the alphabet is the domain's vocabulary
+// — Base62Encode defines it — so the rule "could this string ever have
+// been a code?" is answered here, once, by the package that owns the
+// alphabet. Consumers (e.g. the redirect slice's cheap-rejection fast
+// path) call it instead of duplicating the alphabet and cross-checking
+// against drift.
+func IsPossibleCode(code string) bool {
+	if code == "" {
+		return false
+	}
+	for i := 0; i < len(code); i++ {
+		if !strings.ContainsRune(base62Alphabet, rune(code[i])) {
+			return false
+		}
+	}
+	return true
+}
 
 // Base62Encode renders a sequence value as a Base62 string over
 // base62Alphabet.

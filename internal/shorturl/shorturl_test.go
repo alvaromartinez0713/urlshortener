@@ -138,3 +138,41 @@ func TestBase62EncodeKnownValues(t *testing.T) {
 		})
 	}
 }
+
+// TestIsPossibleCode (S16): the domain owns the code-shape predicate —
+// "could this string ever have been produced by Base62Encode?". The
+// redirect slice consumes it instead of duplicating the alphabet.
+func TestIsPossibleCode(t *testing.T) {
+	tests := []struct {
+		code string
+		want bool
+	}{
+		{"0", true},
+		{"10", true},
+		{"abcXYZ019", true},
+		{"", false},                // Base62Encode never returns empty
+		{"-1", false},              // not in the alphabet
+		{"abc def", false},         // space
+		{"código", false},          // non-ASCII
+		{"10/", false},             // path separator
+		{"%20", false},             // percent-encoding
+	}
+	for _, tc := range tests {
+		if got := IsPossibleCode(tc.code); got != tc.want {
+			t.Errorf("IsPossibleCode(%q) = %v, want %v", tc.code, got, tc.want)
+		}
+	}
+}
+
+// TestIsPossibleCodeAcceptsEveryBase62Output (S16): every code the domain
+// can produce must pass its own shape predicate — otherwise a consumer's
+// fast path could reject a producible code.
+func TestIsPossibleCodeAcceptsEveryBase62Output(t *testing.T) {
+	values := []uint64{0, 1, 9, 10, 61, 62, 63, 3843, 3844, 1 << 20, ^uint64(0)}
+	for _, v := range values {
+		code := Base62Encode(v)
+		if !IsPossibleCode(code) {
+			t.Errorf("Base62Encode(%d) = %q rejected by IsPossibleCode", v, code)
+		}
+	}
+}

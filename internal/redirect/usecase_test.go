@@ -126,20 +126,3 @@ func TestRedirectImpossibleCodeRejectedWithoutPortCall(t *testing.T) {
 		})
 	}
 }
-
-func TestRedirectPossibleCodesExactlyMatchBase62Outputs(t *testing.T) {
-	// Consistency guard between the use case's cheap-rejection rule and
-	// the domain's code alphabet (S3): every code the domain can produce
-	// must pass the possible-code check — otherwise the fast path could
-	// 404 a code that exists. This cross-checks without exporting the
-	// domain's (unexported) alphabet constant.
-	uc := NewUseCase(&fakeFinder{})
-
-	values := []uint64{0, 1, 9, 10, 61, 62, 63, 3843, 3844, 1 << 20, ^uint64(0)}
-	for _, v := range values {
-		code := shorturl.Base62Encode(v)
-		if _, err := uc.Redirect(context.Background(), code); err == ErrNotFound {
-			t.Errorf("Base62Encode(%d) = %q rejected as impossible; the fast path would 404 a producible code", v, code)
-		}
-	}
-}
