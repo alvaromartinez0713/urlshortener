@@ -1,4 +1,4 @@
-package postgres
+package postgres_test
 
 // Sociable tests (S5.5): these verify the pgx adapter against a REAL
 // Postgres via testcontainers. They exercise adapter behavior only —
@@ -11,18 +11,15 @@ package postgres
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
+	"urlshortener/internal/platform/postgres"
 	"urlshortener/internal/shorten"
 	"urlshortener/internal/shorturl"
+	"urlshortener/internal/testsupport"
 
 	pgxpool "github.com/jackc/pgx/v5/pgxpool"
-	postgresContainer "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
 // Shared container (S12 fast feedback, T11): ONE Postgres container per
@@ -31,126 +28,17 @@ import (
 // starts collapse into one. Tests stay SEQUENTIAL (no t.Parallel), so the
 // shared handle is consumed without races, and TestMain terminates the
 // container after the run (ryuk is disabled on this host; see below).
-var (
-	sharedOnce sync.Once
-	sharedPool *pgxpool.Pool
-	sharedCtr  *postgresContainer.PostgresContainer
-	sharedErr  error
-)
-
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if sharedPool != nil {
-		sharedPool.Close()
-	}
-	if sharedCtr != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = sharedCtr.Terminate(ctx)
-	}
-	os.Exit(code)
-}
-
-// startPostgres returns the package-wide Postgres pool with a clean urls
-// table. Skips (instead of failing) when Docker is unavailable.
-func startPostgres(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-
-	// Environmental workaround, documented: this host runs SELinux in
-	// enforcing mode, which denies testcontainers' ryuk reaper container
-	// access to the bind-mounted Docker socket (the mount works only with
-	// --security-opt label=disable, which the reaper mount cannot carry).
-	// Ryuk is therefore disabled for these tests; cleanup is instead
-	// guaranteed by TestMain, which terminates the shared container after
-	// the run. On hosts without this SELinux restriction, ryuk remains
-	// enabled unless this env var is set.
-	t.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	sharedOnce.Do(func() {
-		ctr, err := postgresContainer.Run(ctx, "postgres:16-alpine",
-			// Wait for BOTH "ready to accept connections" log lines: after
-			// initdb the server restarts once, and connecting during that
-			// window gets connections reset.
-			postgresContainer.BasicWaitStrategies(),
-			postgresContainer.WithDatabase("urlshortener"),
-			postgresContainer.WithUsername("urlshortener"),
-			postgresContainer.WithPassword("urlshortener"),
-		)
-		if err != nil {
-			sharedErr = fmt.Errorf("start postgres container: %w", err)
-			return
-		}
-		sharedCtr = ctr
-
-		dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
-		if err != nil {
-			sharedErr = fmt.Errorf("container connection string: %w", err)
-			return
-		}
-		pool, err := Connect(context.Background(), dsn)
-		if err != nil {
-			sharedErr = fmt.Errorf("connect pool: %w", err)
-			return
-		}
-
-		if err := RunMigrations(context.Background(), pool); err != nil {
-			pool.Close()
-			sharedErr = fmt.Errorf("run migrations: %w", err)
-			return
-		}
-		sharedPool = pool
-	})
-
-	if sharedErr != nil {
-		if dockerUnavailable(sharedErr) {
-			t.Skipf("docker unavailable, skipping sociable test: %v", sharedErr)
-		}
-		t.Fatalf("start shared postgres: %v", sharedErr)
-	}
-
-	// Per-test DATA isolation (S12): TRUNCATE ... RESTART IDENTITY before
-	// each test, chosen over unique fixtures because several assertions
-	// here are absolute over the whole table ("rejected input persists
-	// nothing" counts rows; the collision test counts rows with code
-	// "10"), and RESTART IDENTITY keeps the sequence deterministic for
-	// sequence-adjacent assertions (NextSequence is asserted relatively,
-	// second > first, so it holds either way). Tests are sequential, so a
-	// truncate at test start is race-free.
-	if _, err := sharedPool.Exec(context.Background(), `TRUNCATE urls RESTART IDENTITY`); err != nil {
-		t.Fatalf("reset urls table: %v", err)
-	}
-	return sharedPool
-}
-
-func TestConnectAppliesQueryTimeouts(t *testing.T) {
-	// S20: Connect configures REAL per-query timeouts — statement_timeout
-	// as a server-side runtime param on every connection — so a hung query
-	// is terminated instead of running unbounded (the previous code
-	// CLAIMED the pool carried per-query timeouts while creating it
-	// unconfigured).
-	pool := startPostgres(t)
-
-	var got string
-	if err := pool.QueryRow(context.Background(), `SHOW statement_timeout`).Scan(&got); err != nil {
-		t.Fatalf("SHOW statement_timeout: %v", err)
-	}
-	if got != "10s" {
-		t.Errorf("statement_timeout = %q, want 10s", got)
-	}
-}
-
-func dockerUnavailable(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "docker") || strings.Contains(msg, "daemon") ||
-		errors.Is(err, context.DeadlineExceeded)
-}
 
 // TestRunMigrationsIdempotentAndTracked pins the S10 contract: migrations
 // are tracked by goose's own table (not the hand-rolled schema_migrations),
 // and running the migrations twice is a no-op the second time.
+// startPostgres returns the shared testsupport pool with a clean urls
+// table (S24: one scaffolding implementation for all container packages).
+func startPostgres(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	return testsupport.E2EPostgres(t)
+}
+
 func TestRunMigrationsIdempotentAndTracked(t *testing.T) {
 	// The shared container applied the migrations once at startup; this
 	// second RunMigrations call pins the S10 contract: tracking makes a
@@ -159,7 +47,7 @@ func TestRunMigrationsIdempotentAndTracked(t *testing.T) {
 	ctx := context.Background()
 
 	// Re-run: tracking must make this a no-op, not an error.
-	if err := RunMigrations(ctx, pool); err != nil {
+	if err := postgres.RunMigrations(ctx, pool); err != nil {
 		t.Fatalf("second RunMigrations: %v", err)
 	}
 
@@ -207,7 +95,7 @@ func TestRunMigrationsIdempotentAndTracked(t *testing.T) {
 
 func TestSavePersistsRow(t *testing.T) {
 	pool := startPostgres(t)
-	repo := New(pool)
+	repo := postgres.New(pool)
 
 	su, err := shorturl.NewShortURL("https://example.com/a/b?q=1", &stubGen{seq: 62})
 	if err != nil {
@@ -239,7 +127,7 @@ func TestSaveCollisionReturnsErrCodeCollision(t *testing.T) {
 	// adapter's job is to translate 23505 into the slice-owned
 	// ErrCodeCollision so the use case can retry.
 	pool := startPostgres(t)
-	repo := New(pool)
+	repo := postgres.New(pool)
 	ctx := context.Background()
 
 	// Seed the conflicting row directly through the pool: this test owns
@@ -269,7 +157,7 @@ func TestSaveCollisionReturnsErrCodeCollision(t *testing.T) {
 
 func TestNextSequenceMonotonic(t *testing.T) {
 	pool := startPostgres(t)
-	repo := New(pool)
+	repo := postgres.New(pool)
 
 	first, err := repo.NextSequence()
 	if err != nil {
