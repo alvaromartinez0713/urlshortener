@@ -54,7 +54,7 @@ func newCaptureLogger() (*slog.Logger, *captureHandler) {
 func newRouter(logger *slog.Logger, handle gin.HandlerFunc) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(middleware.ErrorHandler(logger))
+	router.Use(middleware.ProblemRenderer(logger))
 	router.GET("/thing", handle)
 	return router
 }
@@ -69,7 +69,7 @@ func recordsAt(capture *captureHandler, level slog.Level) []record {
 	return out
 }
 
-func TestErrorHandlerClientProblemRendersMappedProblemAndLogsWarn(t *testing.T) {
+func TestProblemRendererClientProblemRendersMappedProblemAndLogsWarn(t *testing.T) {
 	// 4xx: well-mapped, user-safe problem rendered; WARN for the team.
 	logger, capture := newCaptureLogger()
 	cause := errors.New("domain: url must be an absolute http/https URL")
@@ -105,7 +105,7 @@ func TestErrorHandlerClientProblemRendersMappedProblemAndLogsWarn(t *testing.T) 
 	}
 }
 
-func TestErrorHandlerInfraProblemLogsErrorWithChainButNeverInBody(t *testing.T) {
+func TestProblemRendererInfraProblemLogsErrorWithChainButNeverInBody(t *testing.T) {
 	// 5xx ProblemError: the mapped detail is already user-safe (the slice
 	// guarantees it), so it renders; the internal cause goes to the ERROR
 	// log only.
@@ -140,7 +140,7 @@ func TestErrorHandlerInfraProblemLogsErrorWithChainButNeverInBody(t *testing.T) 
 	}
 }
 
-func TestErrorHandlerPlainErrorRendersGeneric500WithoutInternals(t *testing.T) {
+func TestProblemRendererPlainErrorRendersGeneric500WithoutInternals(t *testing.T) {
 	// A plain (non-Problem) error has unknown provenance: the user gets
 	// the generic 500 problem; the team gets the full chain + context.
 	logger, capture := newCaptureLogger()
@@ -170,14 +170,14 @@ func TestErrorHandlerPlainErrorRendersGeneric500WithoutInternals(t *testing.T) {
 	}
 }
 
-func TestErrorHandlerNoErrorNoErrorLogAndRequestLoggerLogsAccess(t *testing.T) {
+func TestProblemRendererNoErrorNoErrorLogAndRequestLoggerLogsAccess(t *testing.T) {
 	// No c.Error -> the error middleware logs nothing; the request
 	// logger still emits its one INFO access line with the request
 	// context (S13: access logs are the request logger's job).
 	logger, capture := newCaptureLogger()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(middleware.ErrorHandler(logger), middleware.RequestLogger(logger))
+	router.Use(middleware.ProblemRenderer(logger), middleware.RequestLogger(logger))
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 
 	rec := httptest.NewRecorder()
@@ -214,7 +214,7 @@ func TestErrorHandlerNoErrorNoErrorLogAndRequestLoggerLogsAccess(t *testing.T) {
 	}
 }
 
-func TestErrorHandlerDoesNotDoubleRenderAfterResponseWritten(t *testing.T) {
+func TestProblemRendererDoesNotDoubleRenderAfterResponseWritten(t *testing.T) {
 	// If a response was already written (e.g. a handler attached an error
 	// after c.Redirect), the middleware logs but must NOT append a second
 	// body to the response.
@@ -258,5 +258,70 @@ func assertRequestContextAttrs(t *testing.T, r record, wantStatus int) {
 	}
 	if r.attrs["status"] != int64(wantStatus) {
 		t.Errorf("attrs[status] = %v, want %d", r.attrs["status"], wantStatus)
+	}
+}
+
+// TestProblemRendererLogsEveryAttachedError (S18): a handler may attach
+// more than one error; the renderer must log ALL of them, not only the
+// last one.
+func TestProblemRendererLogsEveryAttachedError(t *testing.T) {
+	logger, capture := newCaptureLogger()
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(middleware.ProblemRenderer(logger))
+	router.GET("/thing", func(c *gin.Context) {
+		_ = c.Error(httpx.NewProblemError(httpx.Problem{
+			Status: http.StatusNotFound,
+			Type:   httpx.TypeURI("unknown-code"),
+			Detail: "first failure",
+		}, nil))
+		_ = c.Error(errors.New("second failure"))
+	})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/thing", nil))
+
+	failures := 0
+	for _, r := range capture.records {
+		if r.msg == "request error" {
+			failures++
+		}
+	}
+	if failures != 2 {
+		t.Errorf("request error records = %d, want 2 (every attached error is logged; all: %+v)", failures, capture.records)
+	}
+}
+
+// TestProblemRendererLogsJoinedErrorChain (S18): the chain printer must
+// traverse errors.Join trees (Unwrap() []error), not only single-unwrap
+// chains — a joined cause truncates every other unwrapping printer.
+func TestProblemRendererLogsJoinedErrorChain(t *testing.T) {
+	logger, capture := newCaptureLogger()
+	cause := errors.Join(errors.New("disk full"), errors.New("quota exceeded"))
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(middleware.ProblemRenderer(logger))
+	router.GET("/thing", func(c *gin.Context) {
+		_ = c.Error(httpx.NewProblemError(httpx.Problem{
+			Status: http.StatusInternalServerError,
+			Type:   httpx.TypeURI("internal-error"),
+			Detail: "the request could not be processed at this time",
+		}, cause))
+	})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/thing", nil))
+
+	var chains []string
+	for _, r := range capture.records {
+		if r.msg == "request error" {
+			chains = append(chains, r.attrs["chain"].(string))
+		}
+	}
+	if len(chains) != 1 {
+		t.Fatalf("request error records = %d, want 1 (all: %+v)", len(chains), capture.records)
+	}
+	if !strings.Contains(chains[0], "disk full") || !strings.Contains(chains[0], "quota exceeded") {
+		t.Errorf("chain = %q, want both joined causes present", chains[0])
 	}
 }

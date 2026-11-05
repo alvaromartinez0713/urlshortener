@@ -21,7 +21,7 @@ func getRedirect(t *testing.T, uc *UseCase, code string) *httptest.ResponseRecor
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(middleware.ErrorHandler(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.Use(middleware.ProblemRenderer(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	router.GET("/:code", NewHandler(uc).Redirect)
 
 	rec := httptest.NewRecorder()

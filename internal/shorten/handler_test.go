@@ -41,7 +41,7 @@ func postShortenBase(t *testing.T, uc *UseCase, baseURL, body string) *httptest.
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(middleware.ErrorHandler(testLogger()))
+	router.Use(middleware.ProblemRenderer(testLogger()))
 	router.POST("/shorten", NewHandler(uc, baseURL).Shorten)
 
 	rec := httptest.NewRecorder()

@@ -25,7 +25,8 @@ import (
 // canonical shape (S17): their provenance is unknown, so nothing but the
 // generic document may reach the user (S13).
 
-// ErrorHandler is the centralized error middleware (S13, ADR-003). After
+// ProblemRenderer is the centralized error middleware (S13, ADR-003;
+// S18 renames it for what it does: render the attached problems). After
 // the handler chain returns it inspects gin's attached errors (c.Error):
 //
 //   - httpx.ProblemError: the slice already mapped the failure to a
@@ -34,40 +35,45 @@ import (
 //     for infrastructure failures (status >= 500), always with method,
 //     path, status, the mapped detail and the FULL cause chain.
 //   - any other error: provenance unknown — log ERROR with the full
-//     chain + request context and render the generic 500 problem. The
-//     internal text never reaches the user.
+//     chain + request context and render the canonical generic 500
+//     problem (S17). The internal text never reaches the user.
+//   - EVERY attached error is logged (S18): a request with multiple
+//     c.Error attachments produces one failure record each, in
+//     attachment order; the rendered response is the LAST attached
+//     error's (last-wins, matching gin's c.Errors.Last).
 //   - no error attached: do nothing (the request logger owns access logs).
 //
 // A nil logger falls back to slog.Default().
-func ErrorHandler(logger *slog.Logger) gin.HandlerFunc {
+func ProblemRenderer(logger *slog.Logger) gin.HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return func(c *gin.Context) {
 		c.Next()
 
-		attached := c.Errors.Last()
-		if attached == nil {
+		if len(c.Errors) == 0 {
 			return
 		}
-		err := attached.Err
+		// S18: every attached error is logged, in attachment order.
+		for _, attached := range c.Errors {
+			logFailure(c, logger, attached.Err)
+		}
 
+		// Render the LAST attached error (last-wins).
+		err := c.Errors.Last().Err
 		var pe *httpx.ProblemError
-		if errors.As(err, &pe) {
-			logFailure(c, logger, pe.Problem.Status, err)
-			// Never append a body to an already-written response
-			// (e.g. an error attached after c.Redirect).
+		if !errors.As(err, &pe) {
+			// Plain error of unknown provenance: the canonical generic
+			// 500 for the user (S17), full chain already logged.
 			if !c.Writer.Written() {
-				httpx.WriteProblem(c, pe.Problem)
+				httpx.WriteProblem(c, httpx.GenericInternalProblem())
 			}
 			return
 		}
-
-		// Plain error of unknown provenance: the canonical generic 500
-		// for the user (S17), full chain for the team (S13).
-		logFailure(c, logger, http.StatusInternalServerError, err)
+		// Never append a body to an already-written response (e.g. an
+		// error attached after c.Redirect).
 		if !c.Writer.Written() {
-			httpx.WriteProblem(c, httpx.GenericInternalProblem())
+			httpx.WriteProblem(c, pe.Problem)
 		}
 	}
 }
@@ -77,7 +83,12 @@ func ErrorHandler(logger *slog.Logger) gin.HandlerFunc {
 // for infrastructure (5xx) ones and for errors of unknown provenance.
 // Attrs: method, path, status, the mapped (user-safe) detail and the full
 // cause chain — everything the team needs, nothing the user gets.
-func logFailure(c *gin.Context, logger *slog.Logger, status int, err error) {
+func logFailure(c *gin.Context, logger *slog.Logger, err error) {
+	status := http.StatusInternalServerError
+	var pe *httpx.ProblemError
+	if errors.As(err, &pe) {
+		status = pe.Problem.Status
+	}
 	level := slog.LevelError
 	if status < 500 {
 		level = slog.LevelWarn
@@ -91,24 +102,35 @@ func logFailure(c *gin.Context, logger *slog.Logger, status int, err error) {
 	)
 }
 
-// causeChain unwraps err layer by layer and joins every message, so the
-// log shows the whole chain (ProblemError detail -> cause -> ...). fmt's
-// %v would print only the outermost message, losing the middle layers.
+// causeChain flattens err's full cause tree into one string (S18):
+// single-unwrap chains layer by layer, AND errors.Join trees — any error
+// implementing Unwrap() []error has every branch walked (depth-first), so
+// a joined cause is never truncated. fmt's %v would print only the
+// outermost message, losing the rest.
 func causeChain(err error) string {
-	var b strings.Builder
-	for err != nil {
-		if b.Len() > 0 {
-			b.WriteString(": ")
+	var msgs []string
+	var walk func(error)
+	type multiUnwrapper interface{ Unwrap() []error }
+	walk = func(e error) {
+		if e == nil {
+			return
 		}
-		b.WriteString(err.Error())
-		err = errors.Unwrap(err)
+		msgs = append(msgs, e.Error())
+		if u, ok := e.(multiUnwrapper); ok {
+			for _, branch := range u.Unwrap() {
+				walk(branch)
+			}
+			return
+		}
+		walk(errors.Unwrap(e))
 	}
-	return b.String()
+	walk(err)
+	return strings.Join(msgs, ": ")
 }
 
 // RequestLogger emits one INFO access line per request (method, path,
 // status, latency, client IP) via slog, replacing gin.Logger (S13). It is
-// registered INNERMOST (after ErrorHandler) so its latency measures the
+// registered INNERMOST (after ProblemRenderer) so its latency measures the
 // application chain, and its access line is written before the error
 // line of the same request — chronological correlation in the output.
 // A nil logger falls back to slog.Default().
