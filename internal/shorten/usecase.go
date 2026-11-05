@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"urlshortener/internal/shorturl"
 )
@@ -22,38 +21,20 @@ const maxCodeAttempts = 3
 type UseCase struct {
 	repo Repository
 	gen  shorturl.CodeGenerator
-
-	// baseURL is the public origin of generated short URLs (e.g.
-	// "https://sho.rt"), used only to render Result.ShortURL. It is a
-	// plain configuration field, deliberately NOT a port: a port exists
-	// for interactions with the outside world that can fail or vary at
-	// runtime; the base URL is a static deployment setting read by the
-	// composition root. Making it a port would be ceremony, not
-	// architecture.
-	baseURL string
 }
 
 // NewUseCase constructs the use case. repo and gen are commonly the same
 // adapter (the postgres repository also implements shorturl.CodeGenerator
 // via the urls_id sequence), but they are separate ports on purpose: code
 // generation and persistence fail and scale independently.
-func NewUseCase(repo Repository, gen shorturl.CodeGenerator, baseURL string) *UseCase {
-	return &UseCase{
-		repo:    repo,
-		gen:     gen,
-		baseURL: strings.TrimRight(baseURL, "/"),
-	}
+func NewUseCase(repo Repository, gen shorturl.CodeGenerator) *UseCase {
+	return &UseCase{repo: repo, gen: gen}
 }
 
-// Result is the outcome of a successful Shorten: everything the response
-// needs, nothing more.
-type Result struct {
-	Code     string
-	ShortURL string
-	LongURL  string
-}
-
-// Shorten validates and persists a new short URL (S2).
+// Shorten validates and persists a new short URL (S2) and returns the
+// built ShortURL ENTITY (S15): the use case speaks in domain terms only —
+// it renders no presentation. Composing the public "short_url" is the
+// handler's job (the HTTP adapter owns response shape, S5.3).
 //
 // Flow: the domain builds the ShortURL (validation + code assignment, S7)
 // and only then is it persisted. Because NewShortURL validates before
@@ -68,28 +49,24 @@ type Result struct {
 //   - ErrCodeCollision after exhausting retries (500);
 //   - anything else — infrastructure failure from the ports, propagated
 //     as-is (500).
-func (uc *UseCase) Shorten(ctx context.Context, longURL string) (Result, error) {
+func (uc *UseCase) Shorten(ctx context.Context, longURL string) (shorturl.ShortURL, error) {
 	for attempt := 0; attempt < maxCodeAttempts; attempt++ {
 		// Domain construction re-validates each attempt, which is free
 		// and keeps the invariant: a ShortURL is never invalid.
 		su, err := shorturl.NewShortURL(longURL, uc.gen)
 		if err != nil {
-			return Result{}, err
+			return shorturl.ShortURL{}, err
 		}
 
 		err = uc.repo.Save(ctx, su)
 		switch {
 		case err == nil:
-			return Result{
-				Code:     su.Code(),
-				ShortURL: uc.baseURL + "/" + su.Code(),
-				LongURL:  su.Target(),
-			}, nil
+			return su, nil
 		case errors.Is(err, ErrCodeCollision):
 			continue // S3: fresh sequence, fresh code, try again
 		default:
-			return Result{}, fmt.Errorf("shorten: save failed: %w", err)
+			return shorturl.ShortURL{}, fmt.Errorf("shorten: save failed: %w", err)
 		}
 	}
-	return Result{}, ErrCodeGenerationExhausted
+	return shorturl.ShortURL{}, ErrCodeGenerationExhausted
 }

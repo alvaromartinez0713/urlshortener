@@ -125,10 +125,10 @@ func newE2ERouter(t *testing.T) (http.Handler, *pgxpool.Pool) {
 	t.Helper()
 	pool := startE2EPostgres(t)
 	adapter := postgres.New(pool)
-	useCase := shorten.NewUseCase(adapter, adapter, "http://localhost:8080")
+	useCase := shorten.NewUseCase(adapter, adapter)
 
 	router := api.NewRouter(slog.Default())
-	api.MountShorten(router, shorten.NewHandler(useCase))
+	api.MountShorten(router, shorten.NewHandler(useCase, "http://localhost:8080"))
 	return router, pool
 }
 

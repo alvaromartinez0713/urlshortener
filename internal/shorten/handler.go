@@ -3,6 +3,7 @@ package shorten
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,12 +16,18 @@ import (
 // responses. It contains no business logic — validation lives in the
 // domain, orchestration in the use case.
 type Handler struct {
-	uc *UseCase
+	uc      *UseCase
+	baseURL string
 }
 
-// NewHandler constructs the handler over its use case.
-func NewHandler(uc *UseCase) *Handler {
-	return &Handler{uc: uc}
+// NewHandler constructs the handler over its use case. baseURL is the
+// public origin of generated short URLs (e.g. "https://sho.rt"): a
+// PRESENTATION setting (S15) — it shapes the response, not the business
+// outcome — so it lives here, in the HTTP adapter, not in the use case.
+// Trailing slashes are trimmed so "https://sho.rt/" and "https://sho.rt"
+// render identical short URLs.
+func NewHandler(uc *UseCase, baseURL string) *Handler {
+	return &Handler{uc: uc, baseURL: strings.TrimRight(baseURL, "/")}
 }
 
 // shortenRequest is the S2 request shape: {"url": "..."}.
@@ -56,15 +63,17 @@ func (h *Handler) Shorten(c *gin.Context) {
 		return
 	}
 
-	res, err := h.uc.Shorten(c.Request.Context(), req.URL)
+	su, err := h.uc.Shorten(c.Request.Context(), req.URL)
 	if err != nil {
 		_ = c.Error(problemFor(err))
 		return
 	}
 
+	// S15: the RESPONSE is the handler's business — the entity from the
+	// use case is rendered here, public short URL included.
 	c.JSON(http.StatusCreated, gin.H{
-		"code":      res.Code,
-		"short_url": res.ShortURL,
+		"code":      su.Code(),
+		"short_url": h.baseURL + "/" + su.Code(),
 	})
 }
 

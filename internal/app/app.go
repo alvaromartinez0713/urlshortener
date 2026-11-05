@@ -75,11 +75,11 @@ func Run() error {
 	// they stay separate port types so the slices never know the
 	// capabilities share a connection pool.
 	adapter := postgres.New(pool)
-	shortenUseCase := shorten.NewUseCase(adapter, adapter, cfg.BaseURL)
+	shortenUseCase := shorten.NewUseCase(adapter, adapter)
 	redirectUseCase := redirect.NewUseCase(adapter)
 
 	router := api.NewRouter(logger)
-	api.MountShorten(router, shorten.NewHandler(shortenUseCase))
+	api.MountShorten(router, shorten.NewHandler(shortenUseCase, cfg.BaseURL))
 	api.MountRedirect(router, redirect.NewHandler(redirectUseCase))
 
 	srv := &http.Server{
