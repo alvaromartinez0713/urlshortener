@@ -90,7 +90,7 @@ func startPostgres(t *testing.T) *pgxpool.Pool {
 			sharedErr = fmt.Errorf("container connection string: %w", err)
 			return
 		}
-		pool, err := pgxpool.New(context.Background(), dsn)
+		pool, err := Connect(context.Background(), dsn)
 		if err != nil {
 			sharedErr = fmt.Errorf("connect pool: %w", err)
 			return
@@ -123,6 +123,23 @@ func startPostgres(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("reset urls table: %v", err)
 	}
 	return sharedPool
+}
+
+func TestConnectAppliesQueryTimeouts(t *testing.T) {
+	// S20: Connect configures REAL per-query timeouts — statement_timeout
+	// as a server-side runtime param on every connection — so a hung query
+	// is terminated instead of running unbounded (the previous code
+	// CLAIMED the pool carried per-query timeouts while creating it
+	// unconfigured).
+	pool := startPostgres(t)
+
+	var got string
+	if err := pool.QueryRow(context.Background(), `SHOW statement_timeout`).Scan(&got); err != nil {
+		t.Fatalf("SHOW statement_timeout: %v", err)
+	}
+	if got != "10s" {
+		t.Errorf("statement_timeout = %q, want 10s", got)
+	}
 }
 
 func dockerUnavailable(err error) bool {
