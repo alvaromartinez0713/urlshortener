@@ -2,7 +2,6 @@ package httpx
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -30,7 +29,7 @@ func AssertProblem(t testing.TB, rec *httptest.ResponseRecorder, wantStatus int,
 	if body["type"] != wantType {
 		t.Errorf("body[type] = %v, want %q", body["type"], wantType)
 	}
-	if wantTitle := http.StatusText(wantStatus); body["title"] != wantTitle {
+	if wantTitle := (Problem{Status: wantStatus}).Title(); body["title"] != wantTitle {
 		t.Errorf("body[title] = %v, want %q", body["title"], wantTitle)
 	}
 	if body["status"] != float64(wantStatus) {

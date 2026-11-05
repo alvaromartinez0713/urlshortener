@@ -10,6 +10,8 @@
 package httpx
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -40,26 +42,72 @@ type Problem struct {
 	Type string
 	// Detail is the human-readable explanation of this occurrence.
 	Detail string
+	// Instance (RFC 9457 §3.1.5) identifies THIS occurrence of the
+	// problem. When empty, WriteProblem fills it per request with the
+	// request path plus a generated occurrence id ("/path#<id>") — a
+	// correlation handle the user can quote and the team can find in the
+	// logs. An explicit value is rendered verbatim.
+	Instance string
+	// Extensions (RFC 9457 §3.2) render as additional TOP-LEVEL members,
+	// keyed by member name. RFC 9457 explicitly allows extending the
+	// document with problem-specific members.
+	Extensions map[string]any
+}
+
+// recommendedTitles overrides http.StatusText with the phrases current
+// HTTP semantics (RFC 9110, as referenced by RFC 9457) recommend. The
+// notable correction: 422 is "Unprocessable Content", not the legacy
+// "Unprocessable Entity" phrase Go's stdlib still emits.
+var recommendedTitles = map[int]string{
+	http.StatusUnprocessableEntity: "Unprocessable Content",
 }
 
 // Title derives the RFC 9457 "title" from the status code, keeping
-// titles consistent API-wide with zero duplication.
+// titles consistent API-wide with zero duplication. Current RFC
+// recommendations win over legacy stdlib phrases; unknown statuses fall
+// back to http.StatusText.
 func (p Problem) Title() string {
+	if t, ok := recommendedTitles[p.Status]; ok {
+		return t
+	}
 	return http.StatusText(p.Status)
 }
 
+// instanceID returns a short random occurrence id for the instance
+// member: 8 hex chars from crypto/rand — enough to correlate one request's
+// problem with its log lines, cheap enough for every failure.
+func instanceID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "unknown" // crypto/rand unavailable: correlate by path alone
+	}
+	return hex.EncodeToString(b[:])
+}
+
 // WriteProblem renders p as a COMPLETE RFC 9457 problem details response
-// (S9): Content-Type application/problem+json plus the type, title,
-// status and detail members. It aborts the handler chain, so a problem
-// answer is always terminal.
+// (S9, S21): Content-Type application/problem+json, the type, title,
+// status, detail and instance members, plus every extension member at
+// the top level. It aborts the handler chain, so a problem answer is
+// always terminal. An empty Instance is filled per request (see
+// Problem.Instance).
 func WriteProblem(c *gin.Context, p Problem) {
+	instance := p.Instance
+	if instance == "" && c.Request != nil {
+		instance = c.Request.URL.Path + "#" + instanceID()
+	}
+
 	// Set the media type first: gin's render only fills Content-Type
 	// when unset, so this overrides the default application/json.
 	c.Header("Content-Type", "application/problem+json")
-	c.AbortWithStatusJSON(p.Status, gin.H{
-		"type":   p.Type,
-		"title":  p.Title(),
-		"status": p.Status,
-		"detail": p.Detail,
-	})
+	body := gin.H{
+		"type":     p.Type,
+		"title":    p.Title(),
+		"status":   p.Status,
+		"detail":   p.Detail,
+		"instance": instance,
+	}
+	for k, v := range p.Extensions {
+		body[k] = v
+	}
+	c.AbortWithStatusJSON(p.Status, body)
 }
