@@ -105,7 +105,7 @@ func buildRouter(logger *slog.Logger, pool *pgxpool.Pool, baseURL string, cacheT
 	adapter := postgres.New(pool)
 	cacheAdapter := cache.NewMemory(cacheTTL, cacheMaxEntries)
 	shortenUseCase := shorten.NewUseCase(adapter, adapter)
-	redirectUseCase := redirect.NewUseCase(adapter, cacheAdapter, logger)
+	redirectUseCase := redirect.NewUseCase(adapter, cacheAdapter)
 
 	router := api.NewRouter(logger)
 	api.MountShorten(router, shorten.NewHandler(shortenUseCase, baseURL))
