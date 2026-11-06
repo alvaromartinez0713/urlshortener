@@ -90,7 +90,7 @@ func (uc *UseCase) Redirect(ctx context.Context, code string) (shorturl.ShortURL
 		// Get error → degraded, treated as a miss (S27). S29: the team
 		// must SEE the degradation — one WARN, then fall through to the
 		// source of truth.
-		uc.logDegradation("cache get failed; serving from source of truth", code, err)
+		uc.logDegradation(ctx, "cache get failed; serving from source of truth", code, err)
 	}
 
 	su, err = uc.finder.FindByCode(ctx, code)
@@ -102,18 +102,22 @@ func (uc *UseCase) Redirect(ctx context.Context, code string) (shorturl.ShortURL
 	// degraded, not fatal (S27), and an ErrNotFound miss was already
 	// returned above.
 	if putErr := uc.cache.Put(ctx, code, su); putErr != nil {
-		uc.logDegradation("cache put failed; continuing without caching", code, putErr)
+		uc.logDegradation(ctx, "cache put failed; continuing without caching", code, putErr)
 	}
 	return su, nil
 }
 
-// logDegradation emits one WARN for a cache failure (S29/R4-002). A nil
-// logger stays silent by design.
-func (uc *UseCase) logDegradation(msg, code string, err error) {
+// logDegradation emits one WARN for a cache failure (S29/R4-002). It logs
+// with the Redirect REQUEST context (S30/T34, R3-log-ctx-background fix):
+// the correlation id in that context reaches the record, so a degraded-
+// cache warning correlates with the request that caused it — logging with
+// context.Background() would sever that correlation. A nil logger stays
+// silent by design.
+func (uc *UseCase) logDegradation(ctx context.Context, msg, code string, err error) {
 	if uc.logger == nil {
 		return
 	}
-	uc.logger.LogAttrs(context.Background(), slog.LevelWarn, msg,
+	uc.logger.LogAttrs(ctx, slog.LevelWarn, msg,
 		slog.String("code", code),
 		slog.String("error", err.Error()),
 	)
