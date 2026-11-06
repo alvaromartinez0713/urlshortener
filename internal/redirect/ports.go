@@ -37,6 +37,26 @@ type Finder interface {
 	FindByCode(ctx context.Context, code string) (shorturl.ShortURL, error)
 }
 
+// Cache is the fast read source of the redirect slice. Like Finder it is
+// a consumer-owned port (S5.2: every external interaction crosses a
+// core-owned port) implemented by adapters (it.3 ships an in-memory map;
+// a later Redis iteration implements the SAME port, L20) — dumb
+// translators (S5.3) that decide nothing about when to read or write.
+//
+// The core knows THAT a fast source exists, never HOW it caches: the use
+// case orchestrates Get → on miss, Finder → Put (S26) without knowing the
+// eviction policy, TTL semantics or storage technology behind these two
+// methods.
+//
+//   - Get returns the entity stored under code, whether it was found,
+//     and any infrastructure error.
+//   - Put stores the entity under code. Entities are immutable in v1
+//     (S2), so no invalidation exists or is needed (S28).
+type Cache interface {
+	Get(ctx context.Context, code string) (shorturl.ShortURL, bool, error)
+	Put(ctx context.Context, code string, su shorturl.ShortURL) error
+}
+
 // ErrNotFound is returned by Finder.FindByCode (and surfaced by the use
 // case) when the code matches no row. Matched with errors.Is, never by
 // string comparison, so the handler's 404 mapping (S2/S8) stays

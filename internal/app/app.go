@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"urlshortener/internal/api"
+	"urlshortener/internal/platform/cache"
 	"urlshortener/internal/platform/config"
 	"urlshortener/internal/platform/postgres"
 	"urlshortener/internal/redirect"
@@ -52,7 +53,7 @@ func Run() error {
 	}
 	defer pool.Close()
 
-	router := buildRouter(logger, pool, cfg.BaseURL)
+	router := buildRouter(logger, pool, cfg.BaseURL, cfg.CacheTTL, cfg.CacheMaxEntries)
 	return serve(logger, router, cfg.Port)
 }
 
@@ -92,11 +93,15 @@ func connectDatabase(databaseURL string) (*pgxpool.Pool, error) {
 // implements every core-owned port (shorten.Repository +
 // shorturl.CodeGenerator + redirect.Finder); they stay separate port
 // types so the slices never know the capabilities share a connection
-// pool (S5.2).
-func buildRouter(logger *slog.Logger, pool *pgxpool.Pool, baseURL string) http.Handler {
+// pool (S5.2). The redirect cache (S26/S28) is ONE cache.Memory built
+// here from the config knobs — the composition root is the single place
+// that decides WHICH cache engine backs the redirect.Cache port; the use
+// case only knows THAT a fast source exists.
+func buildRouter(logger *slog.Logger, pool *pgxpool.Pool, baseURL string, cacheTTL time.Duration, cacheMaxEntries int) http.Handler {
 	adapter := postgres.New(pool)
+	cacheAdapter := cache.NewMemory(cacheTTL, cacheMaxEntries)
 	shortenUseCase := shorten.NewUseCase(adapter, adapter)
-	redirectUseCase := redirect.NewUseCase(adapter)
+	redirectUseCase := redirect.NewUseCase(adapter, cacheAdapter, logger)
 
 	router := api.NewRouter(logger)
 	api.MountShorten(router, shorten.NewHandler(shortenUseCase, baseURL))

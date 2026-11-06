@@ -36,7 +36,7 @@ func TestRedirectHandlerMovedPermanentlyWithExactLocation(t *testing.T) {
 	// only non-ASCII bytes, so a pure-ASCII target must appear in the
 	// Location header exactly as stored.
 	su := mustRehydrate(t, "10", "https://example.com/a/b?q=1&lang=en#section-2")
-	uc := NewUseCase(&fakeFinder{su: su})
+	uc := NewUseCase(&fakeFinder{su: su}, &fakeCache{}, nil)
 
 	rec := getRedirect(t, uc, "10")
 
@@ -52,7 +52,7 @@ func TestRedirectHandlerMovedPermanentlyWithExactLocation(t *testing.T) {
 func TestRedirectHandlerUnknownCodeIsProblemDetails404(t *testing.T) {
 	// S2 + S8: unknown code -> 404 as an RFC 9457 problem details
 	// document, same shape as every other error answer in the API.
-	uc := NewUseCase(&fakeFinder{err: ErrNotFound})
+	uc := NewUseCase(&fakeFinder{err: ErrNotFound}, &fakeCache{}, nil)
 
 	rec := getRedirect(t, uc, "nope")
 
@@ -65,7 +65,7 @@ func TestRedirectHandlerUnknownCodeIsProblemDetails404(t *testing.T) {
 func TestRedirectHandlerInfraFailureIs500(t *testing.T) {
 	// S8: no panic and no internal error text reaches the user; a port
 	// infrastructure failure surfaces as a 500 problem document.
-	uc := NewUseCase(&fakeFinder{err: errors.New("connection refused")})
+	uc := NewUseCase(&fakeFinder{err: errors.New("connection refused")}, &fakeCache{}, nil)
 
 	rec := getRedirect(t, uc, "10")
 
