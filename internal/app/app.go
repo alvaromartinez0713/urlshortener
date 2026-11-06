@@ -21,6 +21,7 @@ import (
 	"urlshortener/internal/api"
 	"urlshortener/internal/platform/cache"
 	"urlshortener/internal/platform/config"
+	"urlshortener/internal/platform/logx"
 	"urlshortener/internal/platform/postgres"
 	"urlshortener/internal/redirect"
 	"urlshortener/internal/shorten"
@@ -60,8 +61,11 @@ func Run() error {
 // newLogger builds the structured JSON logger and installs it as the
 // process default (S13, ADR-003). It is Run's FIRST step so cmd/api's
 // fatal log line already uses the JSON logger even on early failures.
+// The handler is wrapped with logx.Wrap (S30): any record logged with a
+// request context carrying a request id gains a request_id attribute, so
+// every line of one request correlates.
 func newLogger() *slog.Logger {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(logx.Wrap(slog.NewJSONHandler(os.Stdout, nil)))
 	slog.SetDefault(logger)
 	return logger
 }

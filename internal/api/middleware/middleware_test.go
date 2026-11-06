@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -21,6 +22,7 @@ import (
 
 	"urlshortener/internal/api/middleware"
 	"urlshortener/internal/platform/httpx"
+	"urlshortener/internal/platform/logx"
 )
 
 // record is one captured slog record with its attributes materialized.
@@ -323,5 +325,142 @@ func TestProblemRendererLogsJoinedErrorChain(t *testing.T) {
 	}
 	if !strings.Contains(chains[0], "disk full") || !strings.Contains(chains[0], "quota exceeded") {
 		t.Errorf("chain = %q, want both joined causes present", chains[0])
+	}
+}
+
+// --- RequestID middleware (S30/T33) -------------------------------------
+//
+// The request id middleware runs FIRST in the chain: it puts a
+// correlation id into the request context and echoes it as the
+// X-Request-ID response header. The logx wrapper turns that context id
+// into a request_id attribute on EVERY record of the request, so the
+// access line and the error line of one request grep together — and the
+// id the user quotes from a problem document is the id in the logs.
+
+var responseIDShape = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+// newCorrelatedRouter wires the production middleware ORDER (Recovery >
+// RequestID > RequestLogger > ProblemRenderer) around a handler that
+// fails with a client-class problem, so one request exercises both the
+// INFO access record and the WARN failure record.
+func newCorrelatedRouter(logger *slog.Logger) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(gin.Recovery(), middleware.RequestID(), middleware.RequestLogger(logger), middleware.ProblemRenderer(logger))
+	router.GET("/thing", func(c *gin.Context) {
+		_ = c.Error(httpx.NewProblemError(httpx.Problem{
+			Status: http.StatusUnprocessableEntity,
+			Type:   httpx.TypeURI("invalid-url"),
+			Detail: "url must be an absolute http/https URL",
+		}, errors.New("domain: url must be an absolute http/https URL")))
+	})
+	return router
+}
+
+func TestRequestIDCorrelatesHeaderAndBothLogRecords(t *testing.T) {
+	// One request: the response header, the INFO access record and the
+	// WARN failure record must all carry the SAME request id.
+	capture := &captureHandler{}
+	logger := slog.New(logx.Wrap(capture))
+	router := newCorrelatedRouter(logger)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/thing", nil))
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	header := rec.Header().Get("X-Request-ID")
+	if !responseIDShape.MatchString(header) {
+		t.Fatalf("X-Request-ID header = %q, want a fresh 16-hex-char id", header)
+	}
+
+	infos := recordsAt(capture, slog.LevelInfo)
+	if len(infos) != 1 {
+		t.Fatalf("INFO records = %d, want 1 access line (all: %+v)", len(infos), capture.records)
+	}
+	if id, _ := infos[0].attrs["request_id"].(string); id != header {
+		t.Errorf("access record request_id = %q, want the response header %q", id, header)
+	}
+	warns := recordsAt(capture, slog.LevelWarn)
+	if len(warns) != 1 {
+		t.Fatalf("WARN records = %d, want 1 failure record (all: %+v)", len(warns), capture.records)
+	}
+	if id, _ := warns[0].attrs["request_id"].(string); id != header {
+		t.Errorf("failure record request_id = %q, want the response header %q", id, header)
+	}
+}
+
+// TestRequestIDClientHeaderNeverChoosesInternalID (S31/T35): the client
+// NEVER chooses the request id. A VALID incoming X-Request-ID is preserved
+// separately as client_request_id (logs) — the response header and every
+// log record carry the SERVER-GENERATED internal id.
+func TestRequestIDClientHeaderNeverChoosesInternalID(t *testing.T) {
+	capture := &captureHandler{}
+	logger := slog.New(logx.Wrap(capture))
+	router := newCorrelatedRouter(logger)
+
+	req := httptest.NewRequest(http.MethodGet, "/thing", nil)
+	req.Header.Set("X-Request-ID", "client-correlation.42")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	header := rec.Header().Get("X-Request-ID")
+	if header == "client-correlation.42" {
+		t.Fatalf("X-Request-ID = %q, want a server-generated id (the client must not choose it)", header)
+	}
+	if !responseIDShape.MatchString(header) {
+		t.Fatalf("X-Request-ID = %q, want a fresh 16-hex-char id", header)
+	}
+	for _, want := range []struct {
+		level slog.Level
+		what  string
+	}{
+		{slog.LevelInfo, "access"},
+		{slog.LevelWarn, "failure"},
+	} {
+		recs := recordsAt(capture, want.level)
+		if len(recs) != 1 {
+			t.Fatalf("%s records = %d, want 1 (all: %+v)", want.what, len(recs), capture.records)
+		}
+		if got := recs[0].attrs["request_id"]; got == "client-correlation.42" {
+			t.Errorf("%s record request_id = %v, want the server-generated internal id", want.what, got)
+		}
+		if got := recs[0].attrs["client_request_id"]; got != "client-correlation.42" {
+			t.Errorf("%s record client_request_id = %v, want the sanitized incoming value", want.what, got)
+		}
+	}
+}
+
+func TestRequestIDRejectsInvalidIncomingHeader(t *testing.T) {
+	// An incoming id with characters outside the allowed set must never
+	// be echoed back anywhere (S31): a fresh internal id is generated AND
+	// no client_request_id exists at all.
+	capture := &captureHandler{}
+	logger := slog.New(logx.Wrap(capture))
+	router := newCorrelatedRouter(logger)
+
+	const hostile = "bad id\nX-Evil: 1"
+	req := httptest.NewRequest(http.MethodGet, "/thing", nil)
+	req.Header.Set("X-Request-ID", hostile)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	header := rec.Header().Get("X-Request-ID")
+	if header == hostile {
+		t.Fatal("X-Request-ID echoed the invalid incoming value verbatim")
+	}
+	if !responseIDShape.MatchString(header) {
+		t.Errorf("X-Request-ID = %q, want a fresh valid id replacing the hostile one", header)
+	}
+	if strings.Contains(header, "X-Evil") || strings.ContainsAny(header, " \n\r") {
+		t.Errorf("X-Request-ID = %q, leaked attacker-controlled bytes", header)
+	}
+	// S31: a REJECTED incoming value is not preserved at all — no
+	// client_request_id may exist for hostile input.
+	for _, r := range append(recordsAt(capture, slog.LevelInfo), recordsAt(capture, slog.LevelWarn)...) {
+		if _, present := r.attrs["client_request_id"]; present {
+			t.Errorf("record %+v carries client_request_id for a rejected incoming value", r)
+		}
 	}
 }

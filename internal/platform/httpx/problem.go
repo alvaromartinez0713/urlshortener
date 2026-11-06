@@ -15,6 +15,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"urlshortener/internal/platform/requestid"
 )
 
 // ProblemTypeBase is the documented base URI for every problem "type"
@@ -106,7 +108,15 @@ func GenericInternalProblem() Problem {
 func WriteProblem(c *gin.Context, p Problem) {
 	instance := p.Instance
 	if instance == "" && c.Request != nil {
-		instance = c.Request.URL.Path + "#" + instanceID()
+		// S30: reuse the request id the RequestID middleware put in the
+		// context, so the document's instance and the log lines of this
+		// request correlate on the SAME id. Without one (direct use, no
+		// middleware) fall back to a random occurrence id.
+		id, ok := requestid.FromContext(c.Request.Context())
+		if !ok {
+			id = instanceID()
+		}
+		instance = c.Request.URL.Path + "#" + id
 	}
 
 	// Set the media type first: gin's render only fills Content-Type

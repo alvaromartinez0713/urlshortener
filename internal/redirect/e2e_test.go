@@ -244,6 +244,33 @@ func TestRedirectE2ESecondRedirectStillServesAfterRowDeleted(t *testing.T) {
 	}
 }
 
+// TestRedirectE2EProblemInstanceCarriesTheResponseRequestID (S30/T33) pins
+// the correlation loop end to end: for a 422 problem response, the
+// X-Request-ID response header and the id inside the problem document's
+// instance member must be THE SAME id — the one the user can quote and
+// grep in the logs.
+func TestRedirectE2EProblemInstanceCarriesTheResponseRequestID(t *testing.T) {
+	router, _ := newE2ERouter(t)
+
+	rec := e2ePost(t, router, `{"url":"javascript:alert(1)"}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST /shorten status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+
+	header := rec.Header().Get("X-Request-ID")
+	if header == "" {
+		t.Fatal("X-Request-ID response header is empty, want a correlation id")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
+	}
+	instance, _ := body["instance"].(string)
+	if !strings.HasSuffix(instance, "#"+header) {
+		t.Errorf("problem instance = %q, want it to end with the response's request id %q", instance, header)
+	}
+}
+
 // TestRedirectE2ENeverCachedCodeIs404AfterRowDeleted pins the negative side
 // of the same contract: a code that was WRITTEN but never READ (no prior
 // redirect) must not be resurrected by the cache — after its row is deleted,

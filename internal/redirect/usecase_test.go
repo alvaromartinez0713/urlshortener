@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"urlshortener/internal/platform/logx"
+	"urlshortener/internal/platform/requestid"
 	"urlshortener/internal/shorturl"
 )
 
@@ -343,5 +345,51 @@ func TestRedirectNilLoggerStaysSilent(t *testing.T) {
 	}
 	if su.Target() != "https://example.com" {
 		t.Errorf("Target() = %q, want the Finder's entity", su.Target())
+	}
+}
+
+// TestRedirectDegradationWarningCarriesRequestContext (S30/T34, R3-log-ctx-
+// background regression): logDegradation must log with the Redirect
+// request context — NOT context.Background() — so the request id reaches
+// the WARN record and the degradation line correlates with the request
+// that caused it. Asserted through logx.Wrap: the wrapper lifts the ctx
+// request id into a request_id attr on every record, so if the use case
+// drops the ctx, no request_id can appear. (The test may import the
+// platform requestid/logx packages — tests are infrastructure-adjacent;
+// the production core still imports only stdlib + shorturl.)
+func TestRedirectDegradationWarningCarriesRequestContext(t *testing.T) {
+	h := &captureHandler{}
+	logger := slog.New(logx.Wrap(h))
+	finder := &fakeFinder{su: mustRehydrate(t, "10", "https://example.com")}
+	cache := &fakeCache{getErr: errors.New("cache down")}
+	uc := NewUseCase(finder, cache, logger)
+
+	ctx := requestid.Put(context.Background(), "corr-77")
+	if _, err := uc.Redirect(ctx, "10"); err != nil {
+		t.Fatalf("Redirect unexpected error: %v", err)
+	}
+
+	var warns []slog.Record
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn {
+			warns = append(warns, r)
+		}
+	}
+	if len(warns) != 1 {
+		t.Fatalf("WARN records = %d, want exactly 1 (all: %+v)", len(warns), h.records)
+	}
+	// logx.Wrap lifts the request id from the record's context into a
+	// request_id attr before delegating — so if the use case logged with
+	// context.Background(), no request_id can appear on the record.
+	var gotID string
+	warns[0].Attrs(func(a slog.Attr) bool {
+		if a.Key == "request_id" {
+			gotID, _ = a.Value.Any().(string)
+			return false
+		}
+		return true
+	})
+	if gotID != "corr-77" {
+		t.Errorf("WARN record request_id = %q, want %q (degradation WARN must carry the request ctx, not context.Background())", gotID, "corr-77")
 	}
 }

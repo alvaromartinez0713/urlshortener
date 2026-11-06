@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"urlshortener/internal/platform/requestid"
 )
 
 // Contract tests for the shared problem-details builder (S9): the wire
@@ -59,6 +62,31 @@ func TestWriteProblemRendersCompleteRFC9457(t *testing.T) {
 	}
 	if !strings.HasPrefix(inst, "/") {
 		t.Errorf("body[instance] = %q, want the request path prefix", inst)
+	}
+}
+
+func TestWriteProblemInstanceReusesRequestIDFromContext(t *testing.T) {
+	// S30/T33: when the request context carries a request id (put there
+	// by the RequestID middleware), the generated instance member reuses
+	// it — the id the user quotes and the id in the logs are the same.
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/shorten", nil).
+		WithContext(requestid.Put(context.Background(), "corr-9"))
+
+	WriteProblem(c, Problem{
+		Status: http.StatusUnprocessableEntity,
+		Type:   TypeURI("invalid-url"),
+		Detail: "not an absolute http/https URL",
+	})
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
+	}
+	if body["instance"] != "/shorten#corr-9" {
+		t.Errorf("body[instance] = %v, want the ctx request id reused (\"/shorten#corr-9\")", body["instance"])
 	}
 }
 
