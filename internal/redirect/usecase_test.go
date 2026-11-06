@@ -3,6 +3,7 @@ package redirect
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 
 	"urlshortener/internal/shorturl"
@@ -75,7 +76,7 @@ func TestRedirectSuccessReturnsStoredEntity(t *testing.T) {
 	want := "https://example.com/a/b?q=1#frag"
 	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
 	cache := &fakeCache{}
-	uc := NewUseCase(finder, cache)
+	uc := NewUseCase(finder, cache, nil)
 
 	su, err := uc.Redirect(context.Background(), "10")
 
@@ -94,7 +95,7 @@ func TestRedirectUnknownCodeIsErrNotFound(t *testing.T) {
 	// A code that matches no row is ErrNotFound (matched via errors.Is),
 	// which the handler maps to 404 (S2).
 	finder := &fakeFinder{err: ErrNotFound}
-	uc := NewUseCase(finder, &fakeCache{})
+	uc := NewUseCase(finder, &fakeCache{}, nil)
 
 	su, err := uc.Redirect(context.Background(), "zzz")
 
@@ -111,7 +112,7 @@ func TestRedirectInfraErrorPropagates(t *testing.T) {
 	// use case must not mask a database outage as a client error.
 	infraErr := errors.New("connection refused")
 	finder := &fakeFinder{err: infraErr}
-	uc := NewUseCase(finder, &fakeCache{})
+	uc := NewUseCase(finder, &fakeCache{}, nil)
 
 	su, err := uc.Redirect(context.Background(), "10")
 
@@ -147,7 +148,7 @@ func TestRedirectImpossibleCodeRejectedWithoutPortCall(t *testing.T) {
 			// SUCCEED if it were reached, so only the use case's fast path
 			// can produce ErrNotFound for an impossible code.
 			finder := &fakeFinder{su: mustRehydrate(t, "10", "PORT-MUST-NOT-BE-REACHED")}
-			uc := NewUseCase(finder, &fakeCache{})
+			uc := NewUseCase(finder, &fakeCache{}, nil)
 
 			su, err := uc.Redirect(context.Background(), tc.code)
 
@@ -172,7 +173,7 @@ func TestRedirectCacheHitServesWithoutFinder(t *testing.T) {
 	cache := &fakeCache{entries: map[string]shorturl.ShortURL{
 		"10": mustRehydrate(t, "10", want),
 	}}
-	uc := NewUseCase(finder, cache)
+	uc := NewUseCase(finder, cache, nil)
 
 	su, err := uc.Redirect(context.Background(), "10")
 
@@ -191,7 +192,7 @@ func TestRedirectCacheMissPopulatesCache(t *testing.T) {
 	want := "https://example.com/miss-populates"
 	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
 	cache := &fakeCache{}
-	uc := NewUseCase(finder, cache)
+	uc := NewUseCase(finder, cache, nil)
 
 	su, err := uc.Redirect(context.Background(), "10")
 
@@ -217,7 +218,7 @@ func TestRedirectCacheGetErrorDegradesToFinder(t *testing.T) {
 	want := "https://example.com/get-error"
 	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
 	cache := &fakeCache{getErr: errors.New("cache unavailable")}
-	uc := NewUseCase(finder, cache)
+	uc := NewUseCase(finder, cache, nil)
 
 	su, err := uc.Redirect(context.Background(), "10")
 
@@ -236,7 +237,7 @@ func TestRedirectCachePutErrorDoesNotFailRedirect(t *testing.T) {
 	want := "https://example.com/put-error"
 	finder := &fakeFinder{su: mustRehydrate(t, "10", want)}
 	cache := &fakeCache{putErr: errors.New("cache write failed")}
-	uc := NewUseCase(finder, cache)
+	uc := NewUseCase(finder, cache, nil)
 
 	su, err := uc.Redirect(context.Background(), "10")
 
@@ -255,7 +256,7 @@ func TestRedirectUnknownCodeDoesNotPopulateCache(t *testing.T) {
 	// every probe of a nonexistent code keeps reaching the Finder.
 	finder := &fakeFinder{err: ErrNotFound}
 	cache := &fakeCache{}
-	uc := NewUseCase(finder, cache)
+	uc := NewUseCase(finder, cache, nil)
 
 	su, err := uc.Redirect(context.Background(), "zzz")
 
@@ -267,5 +268,80 @@ func TestRedirectUnknownCodeDoesNotPopulateCache(t *testing.T) {
 	}
 	if len(cache.entries) != 0 {
 		t.Errorf("cache after unknown code = %v, want it empty (no negative caching)", cache.entries)
+	}
+}
+
+// captureHandler is a minimal in-memory slog.Handler so the degradation
+// tests can assert the exact WARN records the use case emits (S29).
+type captureHandler struct{ records []slog.Record }
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func recordAtLevel(records []slog.Record, level slog.Level) int {
+	n := 0
+	for _, r := range records {
+		if r.Level == level {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRedirectCacheGetErrorLogsDegradationWarning (S29/R4-002): a Get error
+// degrades to the Finder (S27) AND emits exactly one WARN — a degraded
+// cache must be visible to the team, not silently swallowed.
+func TestRedirectCacheGetErrorLogsDegradationWarning(t *testing.T) {
+	h := &captureHandler{}
+	finder := &fakeFinder{su: mustRehydrate(t, "10", "https://example.com")}
+	cache := &fakeCache{getErr: errors.New("cache down")}
+	uc := NewUseCase(finder, cache, slog.New(h))
+
+	su, err := uc.Redirect(context.Background(), "10")
+	if err != nil {
+		t.Fatalf("Redirect unexpected error: %v", err)
+	}
+	if su.Target() != "https://example.com" {
+		t.Errorf("Target() = %q, want the Finder's entity (degraded path)", su.Target())
+	}
+	if got := recordAtLevel(h.records, slog.LevelWarn); got != 1 {
+		t.Errorf("WARN records = %d, want exactly 1 for the Get degradation", got)
+	}
+}
+
+// TestRedirectCachePutErrorLogsDegradationWarning (S29/R4-002): a Put error
+// is best-effort ignored (S27) AND emits exactly one WARN.
+func TestRedirectCachePutErrorLogsDegradationWarning(t *testing.T) {
+	h := &captureHandler{}
+	finder := &fakeFinder{su: mustRehydrate(t, "10", "https://example.com")}
+	cache := &fakeCache{putErr: errors.New("cache write refused")}
+	uc := NewUseCase(finder, cache, slog.New(h))
+
+	if _, err := uc.Redirect(context.Background(), "10"); err != nil {
+		t.Fatalf("Redirect unexpected error: %v", err)
+	}
+	if got := recordAtLevel(h.records, slog.LevelWarn); got != 1 {
+		t.Errorf("WARN records = %d, want exactly 1 for the Put degradation", got)
+	}
+}
+
+// TestRedirectNilLoggerStaysSilent (S29): a nil logger is a legitimate
+// wiring choice (tests, tools) — no panic, no logging, behavior unchanged.
+func TestRedirectNilLoggerStaysSilent(t *testing.T) {
+	finder := &fakeFinder{su: mustRehydrate(t, "10", "https://example.com")}
+	cache := &fakeCache{getErr: errors.New("cache down")}
+	uc := NewUseCase(finder, cache, nil)
+
+	su, err := uc.Redirect(context.Background(), "10")
+	if err != nil {
+		t.Fatalf("Redirect unexpected error: %v", err)
+	}
+	if su.Target() != "https://example.com" {
+		t.Errorf("Target() = %q, want the Finder's entity", su.Target())
 	}
 }

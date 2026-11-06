@@ -2,6 +2,7 @@ package redirect
 
 import (
 	"context"
+	"log/slog"
 
 	"urlshortener/internal/shorturl"
 )
@@ -13,13 +14,19 @@ import (
 type UseCase struct {
 	finder Finder
 	cache  Cache
+	// logger is optional (S29): nil stays silent (tests, tools). When
+	// present, a cache Get/Put failure — which S27 degrades, never fails
+	// — emits one WARN so a degraded cache is visible to the team instead
+	// of silently swallowed (R4-002).
+	logger *slog.Logger
 }
 
-// NewUseCase constructs the use case over its read ports. Both are
-// required: finder is the source of truth (the database), cache the fast
-// read source in front of it (S26).
-func NewUseCase(finder Finder, cache Cache) *UseCase {
-	return &UseCase{finder: finder, cache: cache}
+// NewUseCase constructs the use case over its read ports. finder and cache
+// are required: finder is the source of truth (the database), cache the
+// fast read source in front of it (S26). logger is optional; nil stays
+// silent (S29).
+func NewUseCase(finder Finder, cache Cache, logger *slog.Logger) *UseCase {
+	return &UseCase{finder: finder, cache: cache, logger: logger}
 }
 
 // Redirect resolves code to the long URL it redirects to (S2).
@@ -79,15 +86,35 @@ func (uc *UseCase) Redirect(ctx context.Context, code string) (shorturl.ShortURL
 	if err == nil && found {
 		return su, nil
 	}
+	if err != nil {
+		// Get error → degraded, treated as a miss (S27). S29: the team
+		// must SEE the degradation — one WARN, then fall through to the
+		// source of truth.
+		uc.logDegradation("cache get failed; serving from source of truth", code, err)
+	}
 
-	// Get error → treated as a miss (S27): fall through to the Finder.
 	su, err = uc.finder.FindByCode(ctx, code)
 	if err != nil {
 		return shorturl.ShortURL{}, err
 	}
 
 	// Best-effort populate, POSITIVE results only (L20): a Put error is
-	// ignored (S27) and an ErrNotFound miss was already returned above.
-	_ = uc.cache.Put(ctx, code, su)
+	// degraded, not fatal (S27), and an ErrNotFound miss was already
+	// returned above.
+	if putErr := uc.cache.Put(ctx, code, su); putErr != nil {
+		uc.logDegradation("cache put failed; continuing without caching", code, putErr)
+	}
 	return su, nil
+}
+
+// logDegradation emits one WARN for a cache failure (S29/R4-002). A nil
+// logger stays silent by design.
+func (uc *UseCase) logDegradation(msg, code string, err error) {
+	if uc.logger == nil {
+		return
+	}
+	uc.logger.LogAttrs(context.Background(), slog.LevelWarn, msg,
+		slog.String("code", code),
+		slog.String("error", err.Error()),
+	)
 }
