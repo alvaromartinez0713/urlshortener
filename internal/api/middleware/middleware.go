@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"urlshortener/internal/platform/httpx"
+	"urlshortener/internal/platform/requestid"
 )
 
 // The generic 500 problem for plain (non-Problem) errors is httpx's
@@ -126,6 +127,33 @@ func causeChain(err error) string {
 	}
 	walk(err)
 	return strings.Join(msgs, ": ")
+}
+
+// RequestID is the correlation middleware (S30/T33), registered FIRST
+// (right after gin.Recovery): every later middleware, handler and logger
+// runs inside a request context that carries the id.
+//
+// It resolves the request id once per request:
+//
+//   - an incoming X-Request-ID header is honored VERBATIM when it passes
+//     requestid.Sanitize (1-64 chars over [A-Za-z0-9._-]);
+//   - anything else (absent, empty, or hostile bytes) is replaced by a
+//     fresh requestid.NewID() — arbitrary attacker input is never echoed
+//     into logs or response headers.
+//
+// The resolved id is stored in the REQUEST context (the contract the
+// use case and logx.Wrap consume) and set as the X-Request-ID response
+// header, so a client can correlate its request with the server's logs.
+func RequestID() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, ok := requestid.Sanitize(c.GetHeader("X-Request-ID"))
+		if !ok {
+			id = requestid.NewID()
+		}
+		c.Request = c.Request.WithContext(requestid.Put(c.Request.Context(), id))
+		c.Header("X-Request-ID", id)
+		c.Next()
+	}
 }
 
 // RequestLogger emits one INFO access line per request (method, path,

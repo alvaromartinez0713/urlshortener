@@ -30,7 +30,13 @@ import (
 //     answered with a 500 before any other middleware inspects the
 //     request, and it logs the stack itself (Recovery never attaches a
 //     c.Error, so the error middleware correctly sees nothing).
-//  2. middleware.RequestLogger — access log: registered OUTSIDE the
+//  2. middleware.RequestID — correlation (S30): resolves the request id
+//     (honoring a sanitized X-Request-ID, otherwise generating one) and
+//     puts it into the request context, so the access log, the error log
+//     and the problem documents of one request all share the SAME id.
+//     Runs first among the correlation-aware middlewares so everything
+//     beneath it sees the id.
+//  3. middleware.RequestLogger — access log: registered OUTSIDE the
 //     error middleware so its line is written AFTER the error middleware
 //     has rendered the response, and therefore records the FINAL status
 //     of every request (an error response logged as 200 would make the
@@ -42,7 +48,7 @@ import (
 //     the handlers it wraps.
 func NewRouter(logger *slog.Logger) *gin.Engine {
 	router := gin.New()
-	router.Use(gin.Recovery(), middleware.RequestLogger(logger), middleware.ProblemRenderer(logger))
+	router.Use(gin.Recovery(), middleware.RequestID(), middleware.RequestLogger(logger), middleware.ProblemRenderer(logger))
 
 	router.GET("/healthz", handleHealthz)
 
