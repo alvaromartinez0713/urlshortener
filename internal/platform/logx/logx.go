@@ -33,9 +33,19 @@ func (w wrap) Enabled(ctx context.Context, level slog.Level) bool {
 // record. The record is cloned first: records must never be mutated
 // beyond the handler that owns them.
 func (w wrap) Handle(ctx context.Context, r slog.Record) error {
+	injected := false
 	if id, ok := requestid.FromContext(ctx); ok {
 		r = r.Clone()
 		r.AddAttrs(slog.String("request_id", id))
+		injected = true
+	}
+	if clientID, ok := requestid.ClientFromContext(ctx); ok {
+		// S31: the client id travels under its OWN attribute — it can
+		// never be mistaken for the authoritative internal id.
+		if !injected {
+			r = r.Clone()
+		}
+		r.AddAttrs(slog.String("client_request_id", clientID))
 	}
 	return w.inner.Handle(ctx, r)
 }

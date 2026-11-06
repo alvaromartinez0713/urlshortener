@@ -87,3 +87,23 @@ func TestWrapDelegatesEnabled(t *testing.T) {
 	}
 	_ = time.Now // keep the time import anchored if assertions evolve
 }
+
+// TestWrapInjectsClientRequestID (S31/T35): the client-supplied
+// correlation id travels under its OWN attribute, never merged into
+// request_id — the server-generated id stays authoritative.
+func TestWrapInjectsClientRequestID(t *testing.T) {
+	h := &captureHandler{}
+	ctx := requestid.PutClient(context.Background(), "client-correlation.42")
+	if err := logx.Wrap(h).Handle(ctx, slog.NewRecord(time.Now(), slog.LevelWarn, "with client id", 0)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(h.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(h.records))
+	}
+	if got := h.records[0].attrs["client_request_id"]; got != "client-correlation.42" {
+		t.Errorf("attrs[client_request_id] = %v, want the client value under its own attribute", got)
+	}
+	if _, present := h.records[0].attrs["request_id"]; present {
+		t.Errorf("attrs[request_id] = %v, want NO request_id when only a client id is in ctx", h.records[0].attrs["request_id"])
+	}
+}

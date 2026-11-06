@@ -102,3 +102,17 @@ func TestSanitizeRejectsUnsafeValues(t *testing.T) {
 		})
 	}
 }
+
+// TestPutClientRoundTrip (S31/T35): the client-supplied id travels under
+// its OWN context key — it can never collide with (or be mistaken for)
+// the server-generated internal id.
+func TestPutClientRoundTrip(t *testing.T) {
+	ctx := requestid.PutClient(context.Background(), "client-correlation.42")
+	if got, ok := requestid.ClientFromContext(ctx); !ok || got != "client-correlation.42" {
+		t.Errorf("ClientFromContext = (%q, %v), want the stored client id", got, ok)
+	}
+	// The two keys are independent.
+	if _, ok := requestid.FromContext(ctx); ok {
+		t.Error("FromContext = present, want absent: the client key must not leak into the internal one")
+	}
+}

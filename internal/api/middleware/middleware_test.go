@@ -391,8 +391,13 @@ func TestRequestIDCorrelatesHeaderAndBothLogRecords(t *testing.T) {
 	}
 }
 
-func TestRequestIDHonorsValidIncomingHeader(t *testing.T) {
-	logger := slog.New(logx.Wrap(&captureHandler{}))
+// TestRequestIDClientHeaderNeverChoosesInternalID (S31/T35): the client
+// NEVER chooses the request id. A VALID incoming X-Request-ID is preserved
+// separately as client_request_id (logs) — the response header and every
+// log record carry the SERVER-GENERATED internal id.
+func TestRequestIDClientHeaderNeverChoosesInternalID(t *testing.T) {
+	capture := &captureHandler{}
+	logger := slog.New(logx.Wrap(capture))
 	router := newCorrelatedRouter(logger)
 
 	req := httptest.NewRequest(http.MethodGet, "/thing", nil)
@@ -400,15 +405,39 @@ func TestRequestIDHonorsValidIncomingHeader(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if got := rec.Header().Get("X-Request-ID"); got != "client-correlation.42" {
-		t.Errorf("X-Request-ID = %q, want the incoming valid id honored verbatim", got)
+	header := rec.Header().Get("X-Request-ID")
+	if header == "client-correlation.42" {
+		t.Fatalf("X-Request-ID = %q, want a server-generated id (the client must not choose it)", header)
+	}
+	if !responseIDShape.MatchString(header) {
+		t.Fatalf("X-Request-ID = %q, want a fresh 16-hex-char id", header)
+	}
+	for _, want := range []struct {
+		level slog.Level
+		what  string
+	}{
+		{slog.LevelInfo, "access"},
+		{slog.LevelWarn, "failure"},
+	} {
+		recs := recordsAt(capture, want.level)
+		if len(recs) != 1 {
+			t.Fatalf("%s records = %d, want 1 (all: %+v)", want.what, len(recs), capture.records)
+		}
+		if got := recs[0].attrs["request_id"]; got == "client-correlation.42" {
+			t.Errorf("%s record request_id = %v, want the server-generated internal id", want.what, got)
+		}
+		if got := recs[0].attrs["client_request_id"]; got != "client-correlation.42" {
+			t.Errorf("%s record client_request_id = %v, want the sanitized incoming value", want.what, got)
+		}
 	}
 }
 
 func TestRequestIDRejectsInvalidIncomingHeader(t *testing.T) {
 	// An incoming id with characters outside the allowed set must never
-	// be echoed back: a fresh valid id replaces it.
-	logger := slog.New(logx.Wrap(&captureHandler{}))
+	// be echoed back anywhere (S31): a fresh internal id is generated AND
+	// no client_request_id exists at all.
+	capture := &captureHandler{}
+	logger := slog.New(logx.Wrap(capture))
 	router := newCorrelatedRouter(logger)
 
 	const hostile = "bad id\nX-Evil: 1"
@@ -426,5 +455,12 @@ func TestRequestIDRejectsInvalidIncomingHeader(t *testing.T) {
 	}
 	if strings.Contains(header, "X-Evil") || strings.ContainsAny(header, " \n\r") {
 		t.Errorf("X-Request-ID = %q, leaked attacker-controlled bytes", header)
+	}
+	// S31: a REJECTED incoming value is not preserved at all — no
+	// client_request_id may exist for hostile input.
+	for _, r := range append(recordsAt(capture, slog.LevelInfo), recordsAt(capture, slog.LevelWarn)...) {
+		if _, present := r.attrs["client_request_id"]; present {
+			t.Errorf("record %+v carries client_request_id for a rejected incoming value", r)
+		}
 	}
 }

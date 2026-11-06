@@ -20,8 +20,12 @@ import (
 const maxIncomingLength = 64
 
 // ctxKey is unexported so only this package can store or read the id —
-// other packages cannot collide with (or forge) the context key.
+// other packages cannot collide with (or forge) the context key. The
+// client key (S31) is a distinct type for the same reason: the two
+// identities must never be mistakable for each other.
 type ctxKey struct{}
+
+type clientCtxKey struct{}
 
 // Put returns a copy of ctx carrying the request id.
 func Put(ctx context.Context, id string) context.Context {
@@ -32,6 +36,22 @@ func Put(ctx context.Context, id string) context.Context {
 // present. An absent id is the normal case for non-request logging.
 func FromContext(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(ctxKey{}).(string)
+	return id, ok
+}
+
+// PutClient returns a copy of ctx carrying the CLIENT-supplied correlation
+// id (S31): a sanitized incoming X-Request-ID, kept under its own key so
+// it can never be mistaken for — or collide with — the server-generated
+// internal id. Purely informational: for the client's cross-system
+// correlation.
+func PutClient(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, clientCtxKey{}, id)
+}
+
+// ClientFromContext returns the client-supplied correlation id stored by
+// PutClient, and whether one was present.
+func ClientFromContext(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(clientCtxKey{}).(string)
 	return id, ok
 }
 
