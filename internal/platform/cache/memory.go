@@ -54,7 +54,7 @@ var _ redirect.Cache = (*Memory)(nil)
 // exclusion). A plain map behind sync.RWMutex is type-safe, trivial to
 // reason about, and its read lock is uncontended-cheap at this scale.
 type Memory struct {
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	ttl     time.Duration
 	max     int
 	entries map[string]entry
@@ -110,22 +110,26 @@ func NewMemory(ttl time.Duration, maxEntries int) *Memory {
 // Context: accepted for the port but unused — the operation is an in-process
 // map access with no cancellation or deadline to honor.
 func (m *Memory) Get(ctx context.Context, code string) (shorturl.ShortURL, bool, error) {
-	m.mu.RLock()
-	e, ok := m.entries[code]
-	m.mu.RUnlock()
+	// Whole operation under the WRITE lock (S29/R3-get-expired-race-extra-miss):
+	// the earlier RLock-then-upgrade design left a window between the two
+	// lock acquisitions in which a concurrent Put could REPLACE an expired
+	// entry with a live one — the re-check saw it live, skipped the delete,
+	// and still reported a miss: a spurious miss with a fresh value present.
+	// One lock acquisition makes that interleaving structurally impossible.
+	// The RWMutex read fast path was optimizing a map access that is
+	// nanoseconds against a multi-millisecond DB round-trip — not worth the
+	// race it introduced.
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
+	e, ok := m.entries[code]
 	if !ok {
 		return shorturl.ShortURL{}, false, nil
 	}
 	if time.Now().After(e.expiresAt) {
-		// Lazy expiry: upgrade to the write lock and delete, re-checking
-		// under it (another goroutine may have deleted or replaced the
-		// entry between the RUnlock and here). Report a miss either way.
-		m.mu.Lock()
-		if now, ok := m.entries[code]; ok && time.Now().After(now.expiresAt) {
-			delete(m.entries, code)
-		}
-		m.mu.Unlock()
+		// Lazy expiry: delete under the same lock that observed the
+		// expiry — no window for a concurrent replacement.
+		delete(m.entries, code)
 		return shorturl.ShortURL{}, false, nil
 	}
 	return e.su, true, nil
