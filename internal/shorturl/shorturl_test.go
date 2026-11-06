@@ -157,12 +157,12 @@ func TestIsPossibleCode(t *testing.T) {
 		{"0", true},
 		{"10", true},
 		{"abcXYZ019", true},
-		{"", false},                // Base62Encode never returns empty
-		{"-1", false},              // not in the alphabet
-		{"abc def", false},         // space
-		{"código", false},          // non-ASCII
-		{"10/", false},             // path separator
-		{"%20", false},             // percent-encoding
+		{"", false},        // Base62Encode never returns empty
+		{"-1", false},      // not in the alphabet
+		{"abc def", false}, // space
+		{"código", false},  // non-ASCII
+		{"10/", false},     // path separator
+		{"%20", false},     // percent-encoding
 	}
 	for _, tc := range tests {
 		if got := IsPossibleCode(tc.code); got != tc.want {

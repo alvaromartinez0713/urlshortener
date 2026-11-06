@@ -1,12 +1,3 @@
-// Package middleware holds the api layer's cross-cutting HTTP middleware
-// (S13): the error handler — the SINGLE place that renders error responses
-// and logs them — and the slog request logger that replaced gin.Logger.
-//
-// It lives in its own subpackage of internal/api, not in the api package
-// itself, so slice-internal tests (package shorten / package redirect)
-// can wire the REAL middleware into their handler-test routers without an
-// import cycle (api imports the slices; the slices' tests import this
-// package, which imports nothing slice-owned).
 package middleware
 
 import (
@@ -14,17 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"urlshortener/internal/platform/httpx"
-	"urlshortener/internal/platform/requestid"
 )
-
-// The generic 500 problem for plain (non-Problem) errors is httpx's
-// canonical shape (S17): their provenance is unknown, so nothing but the
-// generic document may reach the user (S13).
 
 // ProblemRenderer is the centralized error middleware (S13, ADR-003;
 // S18 renames it for what it does: render the attached problems). After
@@ -127,53 +112,4 @@ func causeChain(err error) string {
 	}
 	walk(err)
 	return strings.Join(msgs, ": ")
-}
-
-// RequestID is the correlation middleware (S30/T33, refined S31/T35),
-// registered FIRST (right after gin.Recovery): every later middleware,
-// handler and logger runs inside a request context that carries the id.
-//
-// Trust boundary (S31): the client NEVER chooses the request id. The
-// internal id is ALWAYS server-generated (requestid.NewID) — it is the
-// response X-Request-ID header and the id every log record and problem
-// instance carries. A sanitized incoming X-Request-ID is preserved
-// SEPARATELY as client_request_id (own context key, own log attribute)
-// purely for the client's cross-system correlation; an invalid or absent
-// one is simply absent. Arbitrary attacker bytes are never echoed
-// anywhere (requestid.Sanitize).
-func RequestID() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		id := requestid.NewID()
-		ctx := requestid.Put(c.Request.Context(), id)
-		if clientID, ok := requestid.Sanitize(c.GetHeader("X-Request-ID")); ok {
-			ctx = requestid.PutClient(ctx, clientID)
-		}
-		c.Request = c.Request.WithContext(ctx)
-		c.Header("X-Request-ID", id)
-		c.Next()
-	}
-}
-
-// RequestLogger emits one INFO access line per request (method, path,
-// status, latency, client IP) via slog, replacing gin.Logger (S13). It is
-// registered INNERMOST (after ProblemRenderer) so its latency measures the
-// application chain, and its access line is written before the error
-// line of the same request — chronological correlation in the output.
-// A nil logger falls back to slog.Default().
-func RequestLogger(logger *slog.Logger) gin.HandlerFunc {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-
-		logger.LogAttrs(c.Request.Context(), slog.LevelInfo, "request",
-			slog.String("method", c.Request.Method),
-			slog.String("path", c.Request.URL.Path),
-			slog.Int("status", c.Writer.Status()),
-			slog.Duration("latency", time.Since(start)),
-			slog.String("client_ip", c.ClientIP()),
-		)
-	}
 }
