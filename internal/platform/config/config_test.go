@@ -138,6 +138,8 @@ func TestLoad_CacheTTL(t *testing.T) {
 		{name: "empty falls back to default", ttl: "", want: 5 * time.Minute},
 		{name: "unparseable", ttl: "five minutes", wantErr: true},
 		{name: "bare number is not a duration", ttl: "300", wantErr: true},
+		{name: "zero ttl is rejected", ttl: "0s", wantErr: true},
+		{name: "negative ttl is rejected", ttl: "-5m", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

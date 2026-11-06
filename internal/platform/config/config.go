@@ -56,9 +56,14 @@ func Load() (Config, error) {
 	}
 
 	// Cache knobs (S28) come from the same single env reader (S14).
+	// S29: a non-positive TTL is a config error, not a silently clamped
+	// value — the same fail-at-config-time rule as PORT (S23).
 	ttl, err := time.ParseDuration(envOr("CACHE_TTL", "5m"))
 	if err != nil {
 		return Config{}, fmt.Errorf("config: CACHE_TTL is not a valid duration: %w", err)
+	}
+	if ttl <= 0 {
+		return Config{}, fmt.Errorf("config: CACHE_TTL %q must be positive", ttl)
 	}
 	maxEntries, err := strconv.Atoi(envOr("CACHE_MAX_ENTRIES", "10000"))
 	if err != nil {
