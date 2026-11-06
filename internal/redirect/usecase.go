@@ -2,7 +2,6 @@ package redirect
 
 import (
 	"context"
-	"log/slog"
 
 	"urlshortener/internal/shorturl"
 )
@@ -14,19 +13,21 @@ import (
 type UseCase struct {
 	finder Finder
 	cache  Cache
-	// logger is optional (S29): nil stays silent (tests, tools). When
-	// present, a cache Get/Put failure — which S27 degrades, never fails
-	// — emits one WARN so a degraded cache is visible to the team instead
-	// of silently swallowed (R4-002).
-	logger *slog.Logger
 }
 
-// NewUseCase constructs the use case over its read ports. finder and cache
-// are required: finder is the source of truth (the database), cache the
-// fast read source in front of it (S26). logger is optional; nil stays
-// silent (S29).
-func NewUseCase(finder Finder, cache Cache, logger *slog.Logger) *UseCase {
-	return &UseCase{finder: finder, cache: cache, logger: logger}
+// NewUseCase constructs the use case over its read ports. Both are
+// required: finder is the source of truth (the database), cache the fast
+// read source in front of it (S26).
+//
+// S32 (logging ownership): the use case never logs. A cache Get/Put
+// failure is DEGRADED here (S27: treated as a miss / best-effort ignored)
+// and REPORTED by the adapter that experienced it — the adapter knows
+// when it failed and holds the request ctx, so its failure logs stay
+// request-correlated via logx. The in-memory adapter cannot fail by
+// construction; the logging obligation lands on the first failure-capable
+// adapter (Redis, it.4).
+func NewUseCase(finder Finder, cache Cache) *UseCase {
+	return &UseCase{finder: finder, cache: cache}
 }
 
 // Redirect resolves code to the long URL it redirects to (S2).
@@ -86,39 +87,17 @@ func (uc *UseCase) Redirect(ctx context.Context, code string) (shorturl.ShortURL
 	if err == nil && found {
 		return su, nil
 	}
-	if err != nil {
-		// Get error → degraded, treated as a miss (S27). S29: the team
-		// must SEE the degradation — one WARN, then fall through to the
-		// source of truth.
-		uc.logDegradation(ctx, "cache get failed; serving from source of truth", code, err)
-	}
 
+	// Get error → degraded, treated as a miss (S27). The failing adapter
+	// reports itself (S32: the core never logs) — the core only decides
+	// the outcome: fall through to the source of truth.
 	su, err = uc.finder.FindByCode(ctx, code)
 	if err != nil {
 		return shorturl.ShortURL{}, err
 	}
 
 	// Best-effort populate, POSITIVE results only (L20): a Put error is
-	// degraded, not fatal (S27), and an ErrNotFound miss was already
-	// returned above.
-	if putErr := uc.cache.Put(ctx, code, su); putErr != nil {
-		uc.logDegradation(ctx, "cache put failed; continuing without caching", code, putErr)
-	}
+	// degraded (S27) and reported by the adapter (S32).
+	_ = uc.cache.Put(ctx, code, su)
 	return su, nil
-}
-
-// logDegradation emits one WARN for a cache failure (S29/R4-002). It logs
-// with the Redirect REQUEST context (S30/T34, R3-log-ctx-background fix):
-// the correlation id in that context reaches the record, so a degraded-
-// cache warning correlates with the request that caused it — logging with
-// context.Background() would sever that correlation. A nil logger stays
-// silent by design.
-func (uc *UseCase) logDegradation(ctx context.Context, msg, code string, err error) {
-	if uc.logger == nil {
-		return
-	}
-	uc.logger.LogAttrs(ctx, slog.LevelWarn, msg,
-		slog.String("code", code),
-		slog.String("error", err.Error()),
-	)
 }
